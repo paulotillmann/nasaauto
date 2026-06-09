@@ -38,7 +38,9 @@ import {
   Mail,
   MessageSquare,
   Pencil,
-  LogOut
+  LogOut,
+  Camera,
+  User
 } from 'lucide-react';
 
 // Interfaces para tipagem dos dados
@@ -118,6 +120,16 @@ const App: React.FC = () => {
   const [activeNavItem, setActiveNavItem] = useState<string>('Início');
   const [showLogoutModal, setShowLogoutModal] = useState(false);
 
+  // --- Estados do Perfil ---
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [profileImageFile, setProfileImageFile] = useState<File | null>(null);
+  const [profileImageUrl, setProfileImageUrl] = useState('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSuccess, setProfileSuccess] = useState(false);
+  const [resolvedAvatarUrl, setResolvedAvatarUrl] = useState('');
+
   useEffect(() => {
     // Check initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -133,6 +145,44 @@ const App: React.FC = () => {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    const loadAvatar = async () => {
+      let avatarPath = session?.user?.user_metadata?.avatar_url;
+      if (!avatarPath) {
+        setResolvedAvatarUrl('https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80');
+        return;
+      }
+
+      // Se for uma URL pública antiga apontando para o bucket privado arquivos_nfs_xml, converte de volta para o caminho de storage
+      if (avatarPath.startsWith('http') && avatarPath.includes('/storage/v1/object/public/arquivos_nfs_xml/')) {
+        avatarPath = avatarPath.split('/storage/v1/object/public/arquivos_nfs_xml/')[1];
+      }
+
+      if (avatarPath.startsWith('http://') || avatarPath.startsWith('https://')) {
+        setResolvedAvatarUrl(avatarPath);
+      } else {
+        // É um caminho relativo de storage, gera a URL assinada
+        try {
+          const { data, error } = await supabase.storage
+            .from('arquivos_nfs_xml')
+            .createSignedUrl(avatarPath, 60 * 60 * 24); // Válida por 24 horas
+
+          if (error) {
+            console.error('Erro ao gerar URL assinada para o avatar:', error);
+            setResolvedAvatarUrl('https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80');
+          } else if (data?.signedUrl) {
+            setResolvedAvatarUrl(data.signedUrl);
+          }
+        } catch (err) {
+          console.error('Erro ao resolver URL do avatar:', err);
+          setResolvedAvatarUrl('https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80');
+        }
+      }
+    };
+
+    loadAvatar();
+  }, [session?.user?.user_metadata?.avatar_url]);
 
   // --- Roteamento Interno ---
   const [currentScreen, setCurrentScreen] = useState<'dashboard' | 'lista-clientes' | 'cadastro-clientes' | 'importar-nf-xml'>('dashboard');
@@ -818,7 +868,7 @@ const App: React.FC = () => {
       setImportSuccess(true);
       setImportFile(null);
       await fetchImportedFiles(selectedClientId);
-      
+
       setTimeout(() => {
         setImportSuccess(false);
       }, 4000);
@@ -873,7 +923,7 @@ const App: React.FC = () => {
         const { data: publicUrlData } = supabase.storage
           .from('arquivos_nfs_xml')
           .getPublicUrl(storagePath);
-        
+
         if (publicUrlData?.publicUrl) {
           window.open(publicUrlData.publicUrl, '_blank');
         } else {
@@ -1013,6 +1063,105 @@ const App: React.FC = () => {
     }
   };
 
+  const handleOpenProfileModal = () => {
+    setProfileName(session?.user?.user_metadata?.full_name || '');
+    setProfileImageUrl(resolvedAvatarUrl);
+    setProfileImageFile(null);
+    setProfileError(null);
+    setProfileSuccess(false);
+    setShowProfileModal(true);
+  };
+
+  const handleProfileImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      if (file.size > 2 * 1024 * 1024) {
+        setProfileError('A imagem deve ter no máximo 2MB.');
+        return;
+      }
+      if (!file.type.startsWith('image/')) {
+        setProfileError('O arquivo selecionado deve ser uma imagem.');
+        return;
+      }
+      setProfileImageFile(file);
+      setProfileError(null);
+      const localUrl = URL.createObjectURL(file);
+      setProfileImageUrl(localUrl);
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profileName.trim()) {
+      setProfileError('O nome não pode estar vazio.');
+      return;
+    }
+
+    setSavingProfile(true);
+    setProfileError(null);
+    setProfileSuccess(false);
+
+    try {
+      let finalAvatarUrl = session?.user?.user_metadata?.avatar_url || '';
+
+      if (profileImageFile) {
+        const fileExt = profileImageFile.name.split('.').pop();
+        const userId = session?.user?.id;
+        const timestamp = Date.now();
+        const filePath = `avatars/${userId}-${timestamp}.${fileExt}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('arquivos_nfs_xml')
+          .upload(filePath, profileImageFile, {
+            upsert: true,
+          });
+
+        if (uploadError) {
+          throw new Error(`Erro ao enviar imagem: ${uploadError.message}`);
+        }
+
+        finalAvatarUrl = filePath;
+      }
+
+      const { error: updateError } = await supabase.auth.updateUser({
+        data: {
+          full_name: profileName.trim(),
+          avatar_url: finalAvatarUrl,
+        },
+      });
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      setSession((prevSession: any) => {
+        if (!prevSession) return prevSession;
+        return {
+          ...prevSession,
+          user: {
+            ...prevSession.user,
+            user_metadata: {
+              ...prevSession.user.user_metadata,
+              full_name: profileName.trim(),
+              avatar_url: finalAvatarUrl,
+            }
+          }
+        };
+      });
+
+      setProfileSuccess(true);
+      setTimeout(() => {
+        setShowProfileModal(false);
+      }, 1500);
+
+    } catch (err: any) {
+      console.error('Erro ao atualizar perfil:', err);
+      setProfileError(err.message || 'Erro ao salvar o perfil.');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
   if (checkingAuth) {
     return (
       <div className="min-h-screen w-full flex flex-col items-center justify-center bg-background font-sans">
@@ -1036,10 +1185,10 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen w-full bg-background font-sans antialiased text-textPrimary selection:bg-primary/20 p-0 md:py-[4px] md:px-6 lg:py-[4px] lg:px-8">
+    <div className="min-h-screen w-full bg-[#ECEFF6]/40 font-sans antialiased text-textPrimary selection:bg-primary/20 p-0 md:py-[4px] md:px-6 lg:py-[4px] lg:px-8">
 
       {/* Container Principal Centralizado com visual Premium e borda arredondada estilo Desktop Canvas */}
-      <div className="max-w-[1520px] mx-auto bg-[#ECEFF6]/40 rounded-[36px] border border-borderCustom shadow-cardShadow overflow-hidden p-4 md:p-8">
+      <div className="max-w-[1520px] mx-auto rounded-[36px] overflow-hidden p-4 md:p-8">
 
         {/* ======================================================== */}
         {/* HEADER (Altura: 80px)                                    */}
@@ -1179,85 +1328,6 @@ const App: React.FC = () => {
             {/* Ações Rápidas */}
             <div className="flex items-center space-x-2">
 
-              {/* Notificações */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowNotifications(!showNotifications)}
-                  className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-transform hover:scale-105 hover:-translate-y-0.5 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary"
-                >
-                  <Bell className="h-5 w-5" />
-                  <span className="absolute top-2 right-2 h-2.5 w-2.5 rounded-full bg-primary ring-2 ring-surface animate-pulse" />
-                </button>
-
-                {/* Dropdown de Notificações */}
-                <AnimatePresence>
-                  {showNotifications && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 15 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: 15 }}
-                      className="absolute right-0 mt-3 w-80 bg-surface border border-borderCustom rounded-card shadow-dropdownShadow p-4 z-50"
-                    >
-                      <div className="flex justify-between items-center mb-3">
-                        <span className="font-semibold text-sm">Notificações</span>
-                        <span className="text-xs text-primary font-medium cursor-pointer">Marcar todas como lidas</span>
-                      </div>
-                      <div className="space-y-3">
-                        <div className="p-2.5 hover:bg-background rounded-xl transition-colors text-xs cursor-pointer">
-                          <p className="font-semibold text-textPrimary">Randy Gouse aceitou sua solicitação</p>
-                          <p className="text-textSecondary text-[10px] mt-0.5">Há 2 horas</p>
-                        </div>
-                        <div className="p-2.5 hover:bg-background rounded-xl transition-colors text-xs cursor-pointer">
-                          <p className="font-semibold text-textPrimary">O projeto "Desenv. Web" foi marcado como Pago</p>
-                          <p className="text-textSecondary text-[10px] mt-0.5">Há 4 horas</p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {/* Configurações */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowSettingsDropdown(!showSettingsDropdown)}
-                  className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-transform hover:scale-105 hover:-translate-y-0.5 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary"
-                >
-                  <Settings className="h-5 w-5" />
-                </button>
-
-                {/* Dropdown de Configurações */}
-                <AnimatePresence>
-                  {showSettingsDropdown && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 15 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: 15 }}
-                      className="absolute right-0 mt-3 w-48 bg-surface border border-borderCustom rounded-card shadow-dropdownShadow p-2 z-50 text-sm"
-                    >
-                      <button className="w-full text-left px-4 py-2 hover:bg-background rounded-xl transition-colors text-textSecondary hover:text-textPrimary">
-                        Configurações de Perfil
-                      </button>
-                      <button className="w-full text-left px-4 py-2 hover:bg-background rounded-xl transition-colors text-textSecondary hover:text-textPrimary">
-                        Faturamento & Plano
-                      </button>
-                      <button className="w-full text-left px-4 py-2 hover:bg-background rounded-xl transition-colors text-textSecondary hover:text-textPrimary">
-                        Privacidade
-                      </button>
-                      <button
-                        onClick={() => {
-                          setShowSettingsDropdown(false);
-                          setShowLogoutModal(true);
-                        }}
-                        className="w-full text-left px-4 py-2 hover:bg-red-50 text-red-500 rounded-xl transition-colors font-medium border-t border-borderCustom/60 mt-1 pt-2"
-                      >
-                        Sair
-                      </button>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
               {/* Botão de Menu Responsivo (Mobile) */}
               <button
                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -1277,10 +1347,14 @@ const App: React.FC = () => {
                   {session?.user?.email}
                 </span>
               </div>
-              <div className="relative cursor-pointer group">
+              <div 
+                onClick={handleOpenProfileModal}
+                className="relative cursor-pointer group"
+                title="Editar perfil"
+              >
                 <div className="h-12 w-12 rounded-full overflow-hidden border border-borderCustom shadow-sm hover:ring-2 hover:ring-primary transition-all duration-200">
                   <img
-                    src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"
+                    src={resolvedAvatarUrl}
                     alt="Avatar do perfil do usuário"
                     className="h-full w-full object-cover"
                   />
@@ -1634,7 +1708,7 @@ const App: React.FC = () => {
                         {/* Proposals */}
                         <div className="flex flex-col">
                           <span className="text-[10px] text-textSecondary leading-none">Arquivos XML</span>
-                          <span className="text-2xl font-extrabold text-textPrimary mt-1.5">{monthlyXmlCount}</span>
+                          <span className="text-2xl font-extrabold text-blue-500 mt-1.5">{monthlyXmlCount}</span>
                         </div>
 
                         {/* Interviews */}
@@ -1965,9 +2039,8 @@ const App: React.FC = () => {
                             <tr
                               key={client.id || index}
                               onClick={() => handleEditClientClick(client)}
-                              className={`hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${
-                                index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
-                              }`}
+                              className={`hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                                }`}
                             >
                               <td className="px-6 py-3.5 text-xs font-bold text-textPrimary uppercase truncate max-w-[200px]" title={client.nome}>
                                 {client.nome}
@@ -2042,11 +2115,10 @@ const App: React.FC = () => {
                               key={pageNumber}
                               type="button"
                               onClick={() => setCurrentPage(pageNumber)}
-                              className={`h-8 w-8 text-xs font-bold rounded-lg flex items-center justify-center transition-all duration-150 focus:outline-none ${
-                                isActive
+                              className={`h-8 w-8 text-xs font-bold rounded-lg flex items-center justify-center transition-all duration-150 focus:outline-none ${isActive
                                   ? 'bg-primary text-white shadow-sm hover:bg-primary/95 scale-105'
                                   : 'border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary hover:text-textPrimary'
-                              }`}
+                                }`}
                             >
                               {pageNumber}
                             </button>
@@ -2267,8 +2339,8 @@ const App: React.FC = () => {
                         {clientSaving
                           ? 'Salvando...'
                           : editingClient
-                          ? 'Salvar Alterações'
-                          : 'Salvar Cliente'}
+                            ? 'Salvar Alterações'
+                            : 'Salvar Cliente'}
                       </span>
                       {!clientSaving && <Check className="h-4.5 w-4.5" />}
                     </button>
@@ -2362,7 +2434,7 @@ const App: React.FC = () => {
                         <div className="flex flex-col items-center justify-center py-20 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30 w-full">
                           <p className="text-sm font-bold">Nenhum cliente com envios encontrado</p>
                           <p className="text-xs mt-1 text-textSecondary/60">
-                            {searchClientWithSubmissions 
+                            {searchClientWithSubmissions
                               ? 'Tente buscar por outro nome ou realize uma nova importação.'
                               : 'Realize a primeira importação clicando no botão "Novas Importações".'}
                           </p>
@@ -2387,9 +2459,8 @@ const App: React.FC = () => {
                                     setClientSearchTerm(client.nome.toUpperCase());
                                     setImportSubScreen('form');
                                   }}
-                                  className={`hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${
-                                    index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
-                                  }`}
+                                  className={`hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                                    }`}
                                 >
                                   <td className="px-6 py-3.5 text-xs font-bold text-textPrimary uppercase truncate max-w-[200px]" title={client.nome}>
                                     {client.nome}
@@ -2481,11 +2552,10 @@ const App: React.FC = () => {
                                   key={pageNumber}
                                   type="button"
                                   onClick={() => setImportClientsPage(pageNumber)}
-                                  className={`h-8 w-8 text-xs font-bold rounded-lg flex items-center justify-center transition-all duration-150 focus:outline-none ${
-                                    isActive
+                                  className={`h-8 w-8 text-xs font-bold rounded-lg flex items-center justify-center transition-all duration-150 focus:outline-none ${isActive
                                       ? 'bg-primary text-white shadow-sm hover:bg-primary/95 scale-105'
                                       : 'border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary hover:text-textPrimary'
-                                  }`}
+                                    }`}
                                 >
                                   {pageNumber}
                                 </button>
@@ -2537,380 +2607,376 @@ const App: React.FC = () => {
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
                     {/* Card do Formulário de Importação */}
                     <div className="lg:col-span-5 bg-surface rounded-card border border-borderCustom p-6 md:p-8 shadow-cardShadow relative overflow-hidden">
-                    
-                    {/* Alerta de Sucesso */}
-                    <AnimatePresence>
-                      {importSuccess && (
-                        <motion.div
-                          initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-                          animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
-                          exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                          className="bg-green-500/10 border border-green-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-green-700 overflow-hidden"
-                        >
-                          <div className="h-8 w-8 rounded-full bg-green-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
-                            <Check className="h-4.5 w-4.5 stroke-[3]" />
-                          </div>
-                          <div>
-                            <p className="font-bold text-sm">{importSuccessMessage}</p>
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
 
-                    {/* Alerta de Erro */}
-                    <AnimatePresence>
-                      {importError && (
-                        <motion.div
-                          initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-                          animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
-                          exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                          className="bg-red-500/10 border border-red-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-red-700 overflow-hidden"
-                        >
-                          <div className="h-8 w-8 rounded-full bg-red-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
-                            <span className="font-bold font-sans">!</span>
-                          </div>
-                          <div>
-                            <p className="font-bold text-sm">Erro na importação</p>
-                            <p className="text-xs text-red-700/80">{importError}</p>
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-
-                    <form onSubmit={handleImportFileSubmit} className="space-y-6">
-                      {/* Seleção do Cliente (Autocomplete Combobox) */}
-                      <div className="flex flex-col space-y-2 relative">
-                        <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
-                          Cliente <span className="text-primary">*</span>
-                        </label>
-                        <div className="relative">
-                          <input
-                            type="text"
-                            value={clientSearchTerm}
-                            onChange={(e) => {
-                              setClientSearchTerm(e.target.value);
-                              setShowClientSuggestions(true);
-                              if (!e.target.value) {
-                                setSelectedClientId('');
-                              }
-                            }}
-                            onFocus={() => setShowClientSuggestions(true)}
-                            onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
-                            placeholder="Pesquise por nome do cliente..."
-                            className="w-full h-12 px-5 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm"
-                          />
-                          <Search className="absolute right-4 top-3.5 h-5 w-5 text-textSecondary/60 pointer-events-none" />
-                          
-                          {selectedClientId && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedClientId('');
-                                setClientSearchTerm('');
-                              }}
-                              className="absolute right-12 top-3.5 text-textSecondary hover:text-textPrimary"
-                            >
-                              <X className="h-5 w-5" />
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Lista Suspeita Autocomplete */}
-                        {showClientSuggestions && (
-                          <div className="absolute left-0 right-0 top-full mt-2 bg-surface border border-borderCustom rounded-card shadow-dropdownShadow z-30 max-h-60 overflow-y-auto p-2">
-                            {importClients.filter(c =>
-                              c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase())
-                            ).length === 0 ? (
-                              <div className="px-4 py-3 text-xs text-textSecondary text-center">
-                                Nenhum cliente encontrado
-                              </div>
-                            ) : (
-                              importClients
-                                .filter(c => c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase()))
-                                .map((client) => (
-                                  <button
-                                    key={client.id}
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedClientId(client.id);
-                                      setClientSearchTerm(client.nome.toUpperCase());
-                                      setShowClientSuggestions(false);
-                                    }}
-                                    className={`w-full text-left px-4 py-2.5 text-sm rounded-xl transition-colors font-medium flex items-center justify-between ${
-                                      selectedClientId === client.id
-                                        ? 'bg-primary/10 text-primary'
-                                        : 'text-textSecondary hover:text-textPrimary hover:bg-background'
-                                    }`}
-                                  >
-                                    <span className="uppercase">{client.nome}</span>
-                                    {selectedClientId === client.id && <Check className="h-4.5 w-4.5" />}
-                                  </button>
-                                ))
-                            )}
-                          </div>
+                      {/* Alerta de Sucesso */}
+                      <AnimatePresence>
+                        {importSuccess && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                            animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
+                            exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                            className="bg-green-500/10 border border-green-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-green-700 overflow-hidden"
+                          >
+                            <div className="h-8 w-8 rounded-full bg-green-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
+                              <Check className="h-4.5 w-4.5 stroke-[3]" />
+                            </div>
+                            <div>
+                              <p className="font-bold text-sm">{importSuccessMessage}</p>
+                            </div>
+                          </motion.div>
                         )}
-                      </div>
+                      </AnimatePresence>
 
-                      {/* Campo de Upload de Arquivo */}
-                      <div className="flex flex-col space-y-2">
-                        <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
-                          Arquivo (XML ou PDF) <span className="text-primary">*</span>
-                        </label>
+                      {/* Alerta de Erro */}
+                      <AnimatePresence>
+                        {importError && (
+                          <motion.div
+                            initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                            animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
+                            exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                            className="bg-red-500/10 border border-red-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-red-700 overflow-hidden"
+                          >
+                            <div className="h-8 w-8 rounded-full bg-red-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
+                              <span className="font-bold font-sans">!</span>
+                            </div>
+                            <div>
+                              <p className="font-bold text-sm">Erro na importação</p>
+                              <p className="text-xs text-red-700/80">{importError}</p>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
 
-                        {/* Drag and Drop Zone */}
-                        <div
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            setDragActive(true);
-                          }}
-                          onDragLeave={() => setDragActive(false)}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            setDragActive(false);
-                            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                              setImportFile(e.dataTransfer.files[0]);
-                            }
-                          }}
-                          className={`border-2 border-dashed rounded-card p-8 flex flex-col items-center justify-center text-center transition-all duration-200 cursor-pointer min-h-[180px] ${
-                            dragActive
-                              ? 'border-primary bg-primary/5 shadow-inner'
-                              : importFile
-                              ? 'border-green-500/40 bg-green-500/5'
-                              : 'border-borderCustom hover:border-primary/50 hover:bg-primary/5'
-                          }`}
-                        >
-                          <input
-                            type="file"
-                            id="file-upload-input"
-                            accept=".xml,.pdf"
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files[0]) {
-                                setImportFile(e.target.files[0]);
+                      <form onSubmit={handleImportFileSubmit} className="space-y-6">
+                        {/* Seleção do Cliente (Autocomplete Combobox) */}
+                        <div className="flex flex-col space-y-2 relative">
+                          <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
+                            Cliente <span className="text-primary">*</span>
+                          </label>
+                          <div className="relative">
+                            <input
+                              type="text"
+                              value={clientSearchTerm}
+                              onChange={(e) => {
+                                setClientSearchTerm(e.target.value);
+                                setShowClientSuggestions(true);
+                                if (!e.target.value) {
+                                  setSelectedClientId('');
+                                }
+                              }}
+                              onFocus={() => setShowClientSuggestions(true)}
+                              onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
+                              placeholder="Pesquise por nome do cliente..."
+                              className="w-full h-12 px-5 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm"
+                            />
+                            <Search className="absolute right-4 top-3.5 h-5 w-5 text-textSecondary/60 pointer-events-none" />
+
+                            {selectedClientId && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedClientId('');
+                                  setClientSearchTerm('');
+                                }}
+                                className="absolute right-12 top-3.5 text-textSecondary hover:text-textPrimary"
+                              >
+                                <X className="h-5 w-5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Lista Suspeita Autocomplete */}
+                          {showClientSuggestions && (
+                            <div className="absolute left-0 right-0 top-full mt-2 bg-surface border border-borderCustom rounded-card shadow-dropdownShadow z-30 max-h-60 overflow-y-auto p-2">
+                              {importClients.filter(c =>
+                                c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase())
+                              ).length === 0 ? (
+                                <div className="px-4 py-3 text-xs text-textSecondary text-center">
+                                  Nenhum cliente encontrado
+                                </div>
+                              ) : (
+                                importClients
+                                  .filter(c => c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase()))
+                                  .map((client) => (
+                                    <button
+                                      key={client.id}
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedClientId(client.id);
+                                        setClientSearchTerm(client.nome.toUpperCase());
+                                        setShowClientSuggestions(false);
+                                      }}
+                                      className={`w-full text-left px-4 py-2.5 text-sm rounded-xl transition-colors font-medium flex items-center justify-between ${selectedClientId === client.id
+                                          ? 'bg-primary/10 text-primary'
+                                          : 'text-textSecondary hover:text-textPrimary hover:bg-background'
+                                        }`}
+                                    >
+                                      <span className="uppercase">{client.nome}</span>
+                                      {selectedClientId === client.id && <Check className="h-4.5 w-4.5" />}
+                                    </button>
+                                  ))
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Campo de Upload de Arquivo */}
+                        <div className="flex flex-col space-y-2">
+                          <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
+                            Arquivo (XML ou PDF) <span className="text-primary">*</span>
+                          </label>
+
+                          {/* Drag and Drop Zone */}
+                          <div
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              setDragActive(true);
+                            }}
+                            onDragLeave={() => setDragActive(false)}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              setDragActive(false);
+                              if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                                setImportFile(e.dataTransfer.files[0]);
                               }
                             }}
-                            className="hidden"
-                          />
-                          <label htmlFor="file-upload-input" className="cursor-pointer w-full h-full flex flex-col items-center justify-center">
-                            {importFile ? (
-                              <div className="flex flex-col items-center space-y-3">
-                                <div className="h-14 w-14 rounded-2xl bg-green-500/10 flex items-center justify-center text-green-600">
-                                  {importFile.name.split('.').pop()?.toLowerCase() === 'xml' ? (
-                                    <FileCode className="h-8 w-8" />
-                                  ) : (
-                                    <FileText className="h-8 w-8" />
-                                  )}
+                            className={`border-2 border-dashed rounded-card p-8 flex flex-col items-center justify-center text-center transition-all duration-200 cursor-pointer min-h-[180px] ${dragActive
+                                ? 'border-primary bg-primary/5 shadow-inner'
+                                : importFile
+                                  ? 'border-green-500/40 bg-green-500/5'
+                                  : 'border-borderCustom hover:border-primary/50 hover:bg-primary/5'
+                              }`}
+                          >
+                            <input
+                              type="file"
+                              id="file-upload-input"
+                              accept=".xml,.pdf"
+                              onChange={(e) => {
+                                if (e.target.files && e.target.files[0]) {
+                                  setImportFile(e.target.files[0]);
+                                }
+                              }}
+                              className="hidden"
+                            />
+                            <label htmlFor="file-upload-input" className="cursor-pointer w-full h-full flex flex-col items-center justify-center">
+                              {importFile ? (
+                                <div className="flex flex-col items-center space-y-3">
+                                  <div className="h-14 w-14 rounded-2xl bg-green-500/10 flex items-center justify-center text-green-600">
+                                    {importFile.name.split('.').pop()?.toLowerCase() === 'xml' ? (
+                                      <FileCode className="h-8 w-8" />
+                                    ) : (
+                                      <FileText className="h-8 w-8" />
+                                    )}
+                                  </div>
+                                  <div>
+                                    <p className="text-sm font-bold text-textPrimary max-w-md truncate px-4">
+                                      {importFile.name}
+                                    </p>
+                                    <p className="text-xs text-textSecondary mt-1">
+                                      {formatFileSize(importFile.size)}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setImportFile(null);
+                                    }}
+                                    className="px-4 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-btn text-xs font-semibold flex items-center space-x-1.5 transition-colors"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    <span>Remover arquivo</span>
+                                  </button>
                                 </div>
-                                <div>
-                                  <p className="text-sm font-bold text-textPrimary max-w-md truncate px-4">
-                                    {importFile.name}
-                                  </p>
-                                  <p className="text-xs text-textSecondary mt-1">
-                                    {formatFileSize(importFile.size)}
-                                  </p>
+                              ) : (
+                                <div className="flex flex-col items-center space-y-3">
+                                  <div className="h-14 w-14 rounded-2xl bg-background border border-borderCustom flex items-center justify-center text-textSecondary/60 shadow-sm">
+                                    <UploadCloud className="h-7 w-7 text-primary" />
+                                  </div>
+                                  <div>
+                                    <p className="text-sm font-bold text-textPrimary">
+                                      Arraste e solte o arquivo aqui
+                                    </p>
+                                    <p className="text-xs text-textSecondary mt-1">
+                                      ou clique para selecionar do seu computador
+                                    </p>
+                                  </div>
+                                  <span className="text-[10px] text-textSecondary bg-background px-3 py-1 rounded-badge border border-borderCustom/60 font-semibold uppercase tracking-wider font-sans">
+                                    XML ou PDF • Máximo 10MB
+                                  </span>
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setImportFile(null);
-                                  }}
-                                  className="px-4 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-btn text-xs font-semibold flex items-center space-x-1.5 transition-colors"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                  <span>Remover arquivo</span>
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center space-y-3">
-                                <div className="h-14 w-14 rounded-2xl bg-background border border-borderCustom flex items-center justify-center text-textSecondary/60 shadow-sm">
-                                  <UploadCloud className="h-7 w-7 text-primary" />
-                                </div>
-                                <div>
-                                  <p className="text-sm font-bold text-textPrimary">
-                                    Arraste e solte o arquivo aqui
-                                  </p>
-                                  <p className="text-xs text-textSecondary mt-1">
-                                    ou clique para selecionar do seu computador
-                                  </p>
-                                </div>
-                                <span className="text-[10px] text-textSecondary bg-background px-3 py-1 rounded-badge border border-borderCustom/60 font-semibold uppercase tracking-wider font-sans">
-                                  XML ou PDF • Máximo 10MB
-                                </span>
-                              </div>
-                            )}
-                          </label>
+                              )}
+                            </label>
+                          </div>
                         </div>
-                      </div>
 
-                      {/* Botão de Enviar */}
-                      <div className="pt-4 border-t border-borderCustom flex items-center justify-end">
-                        <button
-                          type="submit"
-                          disabled={importing || !selectedClientId || !importFile}
-                          className="w-full sm:w-auto px-8 h-12 bg-primary hover:bg-primary-hover disabled:bg-disabledCustom disabled:cursor-not-allowed text-white font-bold text-sm rounded-btn transition-all duration-200 hover:scale-[1.02] active:scale-95 shadow-md shadow-primary/20 flex items-center justify-center space-x-2"
-                        >
-                          {importing ? (
-                            <>
-                              <Loader2 className="h-5 w-5 animate-spin" />
-                              <span>Importando Arquivo...</span>
-                            </>
-                          ) : (
-                            <>
-                              <span>Importar Arquivo</span>
-                              <Check className="h-4.5 w-4.5" />
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </form>
+                        {/* Botão de Enviar */}
+                        <div className="pt-4 border-t border-borderCustom flex items-center justify-end">
+                          <button
+                            type="submit"
+                            disabled={importing || !selectedClientId || !importFile}
+                            className="w-full sm:w-auto px-8 h-12 bg-primary hover:bg-primary-hover disabled:bg-disabledCustom disabled:cursor-not-allowed text-white font-bold text-sm rounded-btn transition-all duration-200 hover:scale-[1.02] active:scale-95 shadow-md shadow-primary/20 flex items-center justify-center space-x-2"
+                          >
+                            {importing ? (
+                              <>
+                                <Loader2 className="h-5 w-5 animate-spin" />
+                                <span>Importando Arquivo...</span>
+                              </>
+                            ) : (
+                              <>
+                                <span>Importar Arquivo</span>
+                                <Check className="h-4.5 w-4.5" />
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </form>
                     </div>
 
                     {/* Grid de Histórico de Arquivos */}
                     <div className="lg:col-span-7 bg-surface rounded-card border border-borderCustom p-6 md:p-8 shadow-cardShadow flex flex-col">
-                    <div className="mb-6">
-                      <h3 className="text-lg font-bold tracking-tight text-textPrimary">
-                        Histórico de Arquivos Importados
-                      </h3>
-                      <p className="text-xs text-textSecondary mt-0.5">
-                        Visualize e gerencie os documentos que já foram importados do cliente selecionado
-                      </p>
-                    </div>
-
-                    {!selectedClientId ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
-                        <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
-                          <File className="h-6 w-6" />
-                        </div>
-                        <p className="text-xs font-semibold">Nenhum cliente selecionado</p>
-                        <p className="text-[10px] mt-1 text-textSecondary/60">Selecione um cliente no formulário acima para listar seus arquivos.</p>
+                      <div className="mb-6">
+                        <h3 className="text-lg font-bold tracking-tight text-textPrimary">
+                          Histórico de Arquivos Importados
+                        </h3>
+                        <p className="text-xs text-textSecondary mt-0.5">
+                          Visualize e gerencie os documentos que já foram importados do cliente selecionado
+                        </p>
                       </div>
-                    ) : loadingImportedFiles ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-textSecondary">
-                        <Loader2 className="h-6 w-6 animate-spin text-primary mb-3" />
-                        <p className="text-xs font-medium">Carregando histórico de arquivos...</p>
-                      </div>
-                    ) : importedFiles.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
-                        <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
-                          <File className="h-6 w-6" />
+
+                      {!selectedClientId ? (
+                        <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
+                          <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
+                            <File className="h-6 w-6" />
+                          </div>
+                          <p className="text-xs font-semibold">Nenhum cliente selecionado</p>
+                          <p className="text-[10px] mt-1 text-textSecondary/60">Selecione um cliente no formulário acima para listar seus arquivos.</p>
                         </div>
-                        <p className="text-xs font-semibold">Nenhum arquivo importado para este cliente</p>
-                        <p className="text-[10px] mt-1 text-textSecondary/60">Os novos arquivos importados aparecerão neste grid.</p>
-                      </div>
-                    ) : (
-                      <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-y-auto max-h-[400px]">
-                        {/* Cabeçalho da Tabela */}
-                        <div className="grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 bg-[#F4F6FA] border-b border-borderCustom px-4 py-3 text-[10px] font-bold text-textSecondary uppercase tracking-wider">
-                          <div>Nome do Arquivo</div>
-                          <div>Tipo</div>
-                          <div>Tamanho</div>
-                          <div>Importação</div>
-                          <div>Envios</div>
-                          <div className="text-right">Ações</div>
+                      ) : loadingImportedFiles ? (
+                        <div className="flex flex-col items-center justify-center py-12 text-textSecondary">
+                          <Loader2 className="h-6 w-6 animate-spin text-primary mb-3" />
+                          <p className="text-xs font-medium">Carregando histórico de arquivos...</p>
                         </div>
-                        
-                        {/* Lista de Arquivos */}
-                        <div className="divide-y divide-borderCustom/40">
-                          {importedFiles.map((file, index) => (
-                            <div
-                              key={file.id}
-                              className={`grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 px-4 py-3.5 items-center hover:bg-[#DCE3EE] transition-colors duration-150 ${
-                                index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
-                              }`}
-                            >
-                              {/* Nome */}
-                              <div className="text-xs font-bold text-textPrimary truncate" title={file.nome_arquivo}>
-                                {file.nome_arquivo}
-                              </div>
+                      ) : importedFiles.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
+                          <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
+                            <File className="h-6 w-6" />
+                          </div>
+                          <p className="text-xs font-semibold">Nenhum arquivo importado para este cliente</p>
+                          <p className="text-[10px] mt-1 text-textSecondary/60">Os novos arquivos importados aparecerão neste grid.</p>
+                        </div>
+                      ) : (
+                        <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-y-auto max-h-[400px]">
+                          {/* Cabeçalho da Tabela */}
+                          <div className="grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 bg-[#F4F6FA] border-b border-borderCustom px-4 py-3 text-[10px] font-bold text-textSecondary uppercase tracking-wider">
+                            <div>Nome do Arquivo</div>
+                            <div>Tipo</div>
+                            <div>Tamanho</div>
+                            <div>Importação</div>
+                            <div>Envios</div>
+                            <div className="text-right">Ações</div>
+                          </div>
 
-                              {/* Tipo */}
-                              <div className="text-xs">
-                                <span className={`inline-flex items-center px-2 py-0.5 rounded-badge text-[10px] font-bold ${
-                                  file.tipo_arquivo === 'xml'
-                                    ? 'bg-blue-500/10 text-blue-600'
-                                    : 'bg-red-500/10 text-red-600'
-                                }`}>
-                                  {file.tipo_arquivo.toUpperCase()}
-                                </span>
-                              </div>
+                          {/* Lista de Arquivos */}
+                          <div className="divide-y divide-borderCustom/40">
+                            {importedFiles.map((file, index) => (
+                              <div
+                                key={file.id}
+                                className={`grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 px-4 py-3.5 items-center hover:bg-[#DCE3EE] transition-colors duration-150 ${index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                                  }`}
+                              >
+                                {/* Nome */}
+                                <div className="text-xs font-bold text-textPrimary truncate" title={file.nome_arquivo}>
+                                  {file.nome_arquivo}
+                                </div>
 
-                              {/* Tamanho */}
-                              <div className="text-xs text-textSecondary font-semibold">
-                                {formatFileSize(file.tamanho_arquivo)}
-                              </div>
-
-                              {/* Data */}
-                              <div className="text-xs text-textSecondary font-medium">
-                                {formatImportDate(file.created_at)}
-                              </div>
-
-                              {/* Envios */}
-                              <div className="text-xs flex flex-col space-y-1">
-                                <div className="flex items-center space-x-1">
-                                  <span className="text-[10px] text-textSecondary font-semibold">E-mail:</span>
-                                  <span className={file.enviado_email_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
-                                    {file.enviado_email_at ? formatImportDate(file.enviado_email_at) : 'Não enviado'}
+                                {/* Tipo */}
+                                <div className="text-xs">
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-badge text-[10px] font-bold ${file.tipo_arquivo === 'xml'
+                                      ? 'bg-blue-500/10 text-blue-600'
+                                      : 'bg-red-500/10 text-red-600'
+                                    }`}>
+                                    {file.tipo_arquivo.toUpperCase()}
                                   </span>
                                 </div>
-                                <div className="flex items-center space-x-1">
-                                  <span className="text-[10px] text-textSecondary font-semibold">Whats:</span>
-                                  <span className={file.enviado_whatsapp_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
-                                    {file.enviado_whatsapp_at ? formatImportDate(file.enviado_whatsapp_at) : 'Não enviado'}
-                                  </span>
+
+                                {/* Tamanho */}
+                                <div className="text-xs text-textSecondary font-semibold">
+                                  {formatFileSize(file.tamanho_arquivo)}
+                                </div>
+
+                                {/* Data */}
+                                <div className="text-xs text-textSecondary font-medium">
+                                  {formatImportDate(file.created_at)}
+                                </div>
+
+                                {/* Envios */}
+                                <div className="text-xs flex flex-col space-y-1">
+                                  <div className="flex items-center space-x-1">
+                                    <span className="text-[10px] text-textSecondary font-semibold">E-mail:</span>
+                                    <span className={file.enviado_email_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
+                                      {file.enviado_email_at ? formatImportDate(file.enviado_email_at) : 'Não enviado'}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center space-x-1">
+                                    <span className="text-[10px] text-textSecondary font-semibold">Whats:</span>
+                                    <span className={file.enviado_whatsapp_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
+                                      {file.enviado_whatsapp_at ? formatImportDate(file.enviado_whatsapp_at) : 'Não enviado'}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {/* Ações */}
+                                <div className="flex items-center justify-end space-x-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDownloadFile(file.caminho_storage, file.nome_arquivo)}
+                                    className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
+                                    title="Baixar Arquivo"
+                                  >
+                                    <Download className="h-4 w-4" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
+                                    onClick={() => handleSendEmail(file)}
+                                    className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Enviar por E-mail"
+                                  >
+                                    {sendingEmailId === file.id ? (
+                                      <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                                    ) : (
+                                      <Mail className="h-4 w-4" />
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
+                                    onClick={() => handleSendWhatsapp(file)}
+                                    className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Enviar por WhatsApp"
+                                  >
+                                    {sendingWhatsappId === file.id ? (
+                                      <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                                    ) : (
+                                      <MessageSquare className="h-4 w-4" />
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteImportedFile(file.id, file.caminho_storage)}
+                                    className="p-2 bg-surface hover:bg-red-50 border border-borderCustom hover:border-red-200 rounded-full text-textSecondary hover:text-red-500 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
+                                    title="Excluir Arquivo"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
                                 </div>
                               </div>
-
-                              {/* Ações */}
-                              <div className="flex items-center justify-end space-x-1">
-                                <button
-                                  type="button"
-                                  onClick={() => handleDownloadFile(file.caminho_storage, file.nome_arquivo)}
-                                  className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
-                                  title="Baixar Arquivo"
-                                >
-                                  <Download className="h-4 w-4" />
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
-                                  onClick={() => handleSendEmail(file)}
-                                  className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                                  title="Enviar por E-mail"
-                                >
-                                  {sendingEmailId === file.id ? (
-                                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                                  ) : (
-                                    <Mail className="h-4 w-4" />
-                                  )}
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
-                                  onClick={() => handleSendWhatsapp(file)}
-                                  className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                                  title="Enviar por WhatsApp"
-                                >
-                                  {sendingWhatsappId === file.id ? (
-                                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                                  ) : (
-                                    <MessageSquare className="h-4 w-4" />
-                                  )}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteImportedFile(file.id, file.caminho_storage)}
-                                  className="p-2 bg-surface hover:bg-red-50 border border-borderCustom hover:border-red-200 rounded-full text-textSecondary hover:text-red-500 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
-                                  title="Excluir Arquivo"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              </div>
-                            </div>
-                          ))}
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
                     </div>
 
                   </div>
@@ -2936,7 +3002,7 @@ const App: React.FC = () => {
               onClick={() => setShowLogoutModal(false)}
               className="absolute inset-0 bg-[#1e2235]/60 backdrop-blur-sm"
             />
-            
+
             {/* Modal Card */}
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 15 }}
@@ -2954,7 +3020,7 @@ const App: React.FC = () => {
               <h3 className="text-xl font-bold tracking-tight text-textPrimary mb-2">
                 Sair do Sistema
               </h3>
-              
+
               {/* Message */}
               <p className="text-sm text-textSecondary leading-relaxed mb-6">
                 Tem certeza que deseja sair? Você precisará fazer login novamente para acessar seus dados.
@@ -2980,6 +3046,151 @@ const App: React.FC = () => {
                   Sim, Sair
                 </button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Modal de Edição de Perfil de Usuário */}
+      <AnimatePresence>
+        {showProfileModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+          >
+            {/* Backdrop */}
+            <div
+              onClick={() => {
+                if (!savingProfile) setShowProfileModal(false);
+              }}
+              className="absolute inset-0 bg-[#1e2235]/60 backdrop-blur-sm"
+            />
+
+            {/* Modal Card */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ type: 'spring', duration: 0.4 }}
+              className="relative w-full max-w-md bg-surface border border-borderCustom rounded-[30px] shadow-dropdownShadow p-6 md:p-8 flex flex-col z-10"
+            >
+              {/* Botão Fechar */}
+              <button
+                type="button"
+                onClick={() => setShowProfileModal(false)}
+                disabled={savingProfile}
+                className="absolute right-5 top-5 p-2 bg-background hover:bg-slate-100 rounded-full text-textSecondary hover:text-textPrimary transition-colors disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+
+              {/* Título */}
+              <h3 className="text-xl font-bold tracking-tight text-textPrimary mb-6">
+                Editar Perfil
+              </h3>
+
+              {/* Formulário */}
+              <form onSubmit={handleSaveProfile} className="space-y-5">
+                {/* Imagem do Perfil e Upload */}
+                <div className="flex flex-col items-center space-y-2 pb-2">
+                  <div className="relative group cursor-pointer h-24 w-24 rounded-full overflow-hidden border-2 border-borderCustom hover:border-primary transition-all shadow-sm">
+                    <img
+                      src={profileImageUrl}
+                      alt="Preview da foto de perfil"
+                      className="h-full w-full object-cover"
+                    />
+                    <label 
+                      htmlFor="profile-image-upload" 
+                      className="absolute inset-0 bg-black/45 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200 cursor-pointer"
+                    >
+                      <Camera className="h-6 w-6 text-white" />
+                    </label>
+                  </div>
+                  <input
+                    id="profile-image-upload"
+                    type="file"
+                    accept="image/*"
+                    onChange={handleProfileImageChange}
+                    disabled={savingProfile}
+                    className="hidden"
+                  />
+                  <span className="text-xs text-textSecondary font-semibold">
+                    Clique para trocar de imagem
+                  </span>
+                </div>
+
+                {/* Nome Completo */}
+                <div className="flex flex-col space-y-1.5">
+                  <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
+                    Nome Completo
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      placeholder="Seu nome completo"
+                      disabled={savingProfile}
+                      className="w-full h-12 pl-12 pr-4 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm disabled:opacity-60"
+                    />
+                    <User className="absolute left-4 top-3.5 h-5 w-5 text-textSecondary/60" />
+                  </div>
+                </div>
+
+                {/* Email (Apenas Leitura) */}
+                <div className="flex flex-col space-y-1.5">
+                  <label className="text-xs font-bold text-textSecondary uppercase tracking-wider pl-1">
+                    E-mail
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="email"
+                      value={session?.user?.email || ''}
+                      disabled
+                      className="w-full h-12 pl-12 pr-4 text-sm bg-background/50 border border-borderCustom rounded-input text-textSecondary cursor-not-allowed shadow-sm"
+                    />
+                    <Mail className="absolute left-4 top-3.5 h-5 w-5 text-textSecondary/40" />
+                  </div>
+                </div>
+
+                {/* Alertas de Erro/Sucesso */}
+                {profileError && (
+                  <div className="bg-red-500/10 border border-red-500/20 rounded-[20px] p-4 flex items-start space-x-3 text-red-700 text-xs">
+                    <span className="font-medium leading-normal">{profileError}</span>
+                  </div>
+                )}
+
+                {profileSuccess && (
+                  <div className="bg-green-500/10 border border-green-500/20 rounded-[20px] p-4 flex items-start space-x-3 text-green-700 text-xs">
+                    <span className="font-medium leading-normal">Perfil atualizado com sucesso!</span>
+                  </div>
+                )}
+
+                {/* Botões de Ação */}
+                <div className="flex w-full gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowProfileModal(false)}
+                    disabled={savingProfile}
+                    className="flex-1 h-12 bg-background hover:bg-slate-50 border border-borderCustom text-textSecondary hover:text-textPrimary font-semibold text-sm rounded-btn transition-colors duration-200 disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingProfile}
+                    className="flex-1 h-12 bg-primary hover:bg-primary-hover text-white font-bold text-sm rounded-btn transition-all duration-200 hover:scale-[1.01] active:scale-95 shadow-md shadow-primary/10 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {savingProfile ? (
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                    ) : (
+                      'Salvar'
+                    )}
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </motion.div>
         )}

@@ -1,0 +1,6 @@
+name = "nasa-auto"
+pages_build_output_dir = "dist"
+
+[vars]
+VITE_SUPABASE_URL = "https://eiwkmpblwnkfqzwmbpbk.supabase.co"
+VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpd2ttcGJsd25rZnF6d21icGJrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5MzM4MzksImV4cCI6MjA5NjUwOTgzOX0.EDrFuc3l2Z3g9edJqfsuUe5L6FRVWy3ry-PvTvhk-nE"
