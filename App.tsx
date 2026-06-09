@@ -9,6 +9,8 @@ import {
   Bell,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   Plus,
   Check,
   MapPin,
@@ -35,6 +37,7 @@ import {
   File,
   Mail,
   MessageSquare,
+  Pencil,
   LogOut
 } from 'lucide-react';
 
@@ -77,6 +80,24 @@ interface ImportedFile {
   };
 }
 
+const monthsList = [
+  'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+];
+
+const getInitialDaysData = (month: number, year: number) => {
+  const days = new Date(year, month + 1, 0).getDate();
+  const list = [];
+  for (let i = 1; i <= days; i++) {
+    list.push({
+      label: `${i}`,
+      value: 0,
+      labelFull: `${i} de ${monthsList[month]} de ${year}`,
+    });
+  }
+  return list;
+};
+
 const App: React.FC = () => {
   // --- Estados de Autenticação ---
   const [session, setSession] = useState<any>(null);
@@ -113,12 +134,68 @@ const App: React.FC = () => {
     return () => subscription.unsubscribe();
   }, []);
 
-  // --- Estados do Gráfico de Importações ---
+  // --- Roteamento Interno ---
+  const [currentScreen, setCurrentScreen] = useState<'dashboard' | 'lista-clientes' | 'cadastro-clientes' | 'importar-nf-xml'>('dashboard');
+
+  // --- Estados do Gráfico de Envios de E-mails ---
   const [selectedMonth, setSelectedMonth] = useState<number>(5); // Junho (0-indexed, ou seja, 5)
   const [selectedYear, setSelectedYear] = useState<number>(2026); // Ano atual
+  const [chartData, setChartData] = useState<{ label: string; value: number; labelFull: string }[]>(getInitialDaysData(5, 2026));
+  const [loadingChart, setLoadingChart] = useState<boolean>(false);
+  const [monthlyXmlCount, setMonthlyXmlCount] = useState<number>(0);
+  const [monthlyPdfCount, setMonthlyPdfCount] = useState<number>(0);
+  const [monthlyTotalCount, setMonthlyTotalCount] = useState<number>(0);
 
-  // --- Estados do Cadastro de Clientes e Roteamento Interno ---
-  const [currentScreen, setCurrentScreen] = useState<'dashboard' | 'cadastro-clientes' | 'importar-nf-xml'>('dashboard');
+  const fetchChartData = async (month: number, year: number) => {
+    setLoadingChart(true);
+    try {
+      const list = getInitialDaysData(month, year);
+      const startDate = new Date(year, month, 1, 0, 0, 0, 0).toISOString();
+      const endDate = new Date(year, month + 1, 1, 0, 0, 0, 0).toISOString();
+
+      const { data, error } = await supabase
+        .from('arquivos_importados')
+        .select('enviado_email_at, tipo_arquivo')
+        .not('enviado_email_at', 'is', null)
+        .gte('enviado_email_at', startDate)
+        .lt('enviado_email_at', endDate);
+
+      if (error) {
+        console.error('Erro ao buscar dados do gráfico:', error);
+      } else if (data) {
+        data.forEach((item) => {
+          if (item.enviado_email_at) {
+            const date = new Date(item.enviado_email_at);
+            const day = date.getDate();
+            if (day >= 1 && day <= list.length) {
+              list[day - 1].value += 1;
+            }
+          }
+        });
+
+        // Calcular quantidades mensais de XML e PDF enviados
+        const xmls = data.filter(item => item.tipo_arquivo?.toLowerCase() === 'xml').length;
+        const pdfs = data.filter(item => item.tipo_arquivo?.toLowerCase() === 'pdf').length;
+
+        setMonthlyXmlCount(xmls);
+        setMonthlyPdfCount(pdfs);
+        setMonthlyTotalCount(xmls + pdfs);
+      }
+      setChartData(list);
+    } catch (err) {
+      console.error('Erro de conexão ao buscar dados do gráfico:', err);
+    } finally {
+      setLoadingChart(false);
+    }
+  };
+
+  useEffect(() => {
+    if (session && currentScreen === 'dashboard') {
+      fetchChartData(selectedMonth, selectedYear);
+    }
+  }, [selectedMonth, selectedYear, session, currentScreen]);
+
+  // --- Estados do Cadastro de Clientes ---
   const [clientNome, setClientNome] = useState('');
   const [clientEndereco, setClientEndereco] = useState('');
   const [clientWhatsapp, setClientWhatsapp] = useState('');
@@ -131,6 +208,68 @@ const App: React.FC = () => {
   const [showAllClients, setShowAllClients] = useState(false);
   const [editingClient, setEditingClient] = useState<any | null>(null);
   const [totalClients, setTotalClients] = useState(0);
+
+  // --- Estados da Lista de Clientes com Paginação ---
+  const [searchListQuery, setSearchListQuery] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [listClients, setListClients] = useState<any[]>([]);
+  const [totalListClients, setTotalListClients] = useState(0);
+  const [loadingListClients, setLoadingListClients] = useState(true);
+
+  const fetchListClients = async (page = currentPage, search = searchListQuery) => {
+    setLoadingListClients(true);
+    try {
+      const itemsPerPage = 12;
+      const from = (page - 1) * itemsPerPage;
+      const to = from + itemsPerPage - 1;
+
+      let query = supabase
+        .from('clientes')
+        .select('id, nome, whatsapp, email, created_at, endereco', { count: 'exact' })
+        .order('nome', { ascending: true });
+
+      if (search.trim()) {
+        const cleanSearch = search.trim();
+        const cleanPhoneSearch = cleanSearch.replace(/\D/g, '');
+        if (cleanPhoneSearch) {
+          query = query.or(`nome.ilike.%${cleanSearch}%,whatsapp.like.%${cleanPhoneSearch}%`);
+        } else {
+          query = query.ilike('nome', `%${cleanSearch}%`);
+        }
+      }
+
+      query = query.range(from, to);
+
+      const { data, count, error } = await query;
+
+      if (error) {
+        console.error('Erro ao buscar lista de clientes:', error);
+      } else {
+        setListClients(data || []);
+        if (count !== null) {
+          setTotalListClients(count);
+        }
+      }
+    } catch (err) {
+      console.error('Erro de conexão ao buscar lista de clientes:', err);
+    } finally {
+      setLoadingListClients(false);
+    }
+  };
+
+  const handleSearchListChange = (val: string) => {
+    setSearchListQuery(val);
+    setCurrentPage(1);
+  };
+
+  useEffect(() => {
+    if (currentScreen === 'lista-clientes') {
+      const handler = setTimeout(() => {
+        fetchListClients(currentPage, searchListQuery);
+      }, 300);
+      return () => clearTimeout(handler);
+    }
+  }, [currentScreen, currentPage, searchListQuery]);
 
   // --- Estados de Importação de Arquivos ---
   const [importClients, setImportClients] = useState<any[]>([]);
@@ -148,32 +287,15 @@ const App: React.FC = () => {
   const [sendingEmailId, setSendingEmailId] = useState<string | null>(null);
   const [sendingWhatsappId, setSendingWhatsappId] = useState<string | null>(null);
 
-  const monthsList = [
-    'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-    'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
-  ];
+  // --- Estados do Sub-menu de Importação ---
+  const [importSubScreen, setImportSubScreen] = useState<'list' | 'form'>('list');
+  const [clientsWithSubmissions, setClientsWithSubmissions] = useState<any[]>([]);
+  const [searchClientWithSubmissions, setSearchClientWithSubmissions] = useState('');
+  const [loadingClientsWithSubmissions, setLoadingClientsWithSubmissions] = useState(false);
+  const [importClientsPage, setImportClientsPage] = useState(1);
+  const [totalImportClientsCount, setTotalImportClientsCount] = useState(0);
 
-  // Gerar dados determinísticos para o mês selecionado
-  const getDaysData = (month: number, year: number) => {
-    const days = new Date(year, month + 1, 0).getDate();
-    const list = [];
-    for (let i = 1; i <= days; i++) {
-      const value = Math.floor(
-        1500 +
-        Math.sin(i * 0.8 + month) * 700 +
-        ((i + month) % 5 === 0 ? 900 : 0) +
-        ((i * 3 + month) % 7 === 0 ? 1100 : 0)
-      );
-      list.push({
-        label: `${i}`,
-        value,
-        labelFull: `${i} de ${monthsList[month]} de ${year}`,
-      });
-    }
-    return list;
-  };
-
-  const currentPeriodData = getDaysData(selectedMonth, selectedYear);
+  // O gráfico agora utiliza o estado chartData carregado do Supabase
 
   // Projetos Recentes
   const projectsData: Project[] = [
@@ -250,9 +372,9 @@ const App: React.FC = () => {
   };
 
   // Obter o valor atual com base no período selecionado
-  const safeActiveBarIndex = Math.min(activeChartBar, currentPeriodData.length - 1);
-  const activeValue = currentPeriodData[safeActiveBarIndex]?.value || 0;
-  const activeLabel = currentPeriodData[safeActiveBarIndex]?.labelFull || '';
+  const safeActiveBarIndex = Math.min(activeChartBar, chartData.length - 1);
+  const activeValue = chartData[safeActiveBarIndex]?.value || 0;
+  const activeLabel = chartData[safeActiveBarIndex]?.labelFull || '';
 
   // Renderizar ícones do projeto correspondente
   const renderProjectIcon = (type: 'web' | 'copy' | 'design') => {
@@ -309,7 +431,7 @@ const App: React.FC = () => {
   };
 
   // Cálculo das posições do gráfico
-  const maxVal = Math.max(...currentPeriodData.map((d) => d.value));
+  const maxVal = Math.max(1, ...chartData.map((d) => d.value));
 
   const fetchLastClients = async (showAll = showAllClients, search = searchQuery) => {
     setLoadingClients(true);
@@ -345,6 +467,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!session) return;
     const handler = setTimeout(() => {
       fetchLastClients(showAllClients, searchQuery);
     }, 300);
@@ -352,7 +475,7 @@ const App: React.FC = () => {
     return () => {
       clearTimeout(handler);
     };
-  }, [showAllClients, searchQuery]);
+  }, [showAllClients, searchQuery, session]);
 
   const formatWhatsapp = (val: string) => {
     if (!val) return '';
@@ -452,8 +575,7 @@ const App: React.FC = () => {
 
           setTimeout(() => {
             setClientSuccess(false);
-            setCurrentScreen('dashboard');
-            setActiveNavItem('Início');
+            setCurrentScreen('lista-clientes');
           }, 2000);
         }
       } else {
@@ -471,6 +593,7 @@ const App: React.FC = () => {
         } else {
           setClientSuccess(true);
           fetchLastClients();
+          fetchListClients(currentPage, searchListQuery);
           // Limpa os campos
           setClientNome('');
           setClientEndereco('');
@@ -478,10 +601,10 @@ const App: React.FC = () => {
           setClientEmail('');
           setClientErrors({});
 
-          // Remove o alerta de sucesso após 4 segundos
           setTimeout(() => {
             setClientSuccess(false);
-          }, 4000);
+            setCurrentScreen('lista-clientes');
+          }, 2000);
         }
       }
     } catch (err: any) {
@@ -556,6 +679,55 @@ const App: React.FC = () => {
     }
   };
 
+  const fetchClientsWithSubmissions = async (page = importClientsPage, search = searchClientWithSubmissions) => {
+    setLoadingClientsWithSubmissions(true);
+    try {
+      const itemsPerPage = 12;
+      const from = (page - 1) * itemsPerPage;
+      const to = from + itemsPerPage - 1;
+
+      let query = supabase
+        .from('clientes')
+        .select('id, nome, email, whatsapp, arquivos_importados!inner(id, tipo_arquivo)', { count: 'exact' })
+        .order('nome', { ascending: true });
+
+      if (search.trim()) {
+        query = query.ilike('nome', `%${search.trim()}%`);
+      }
+
+      query = query.range(from, to);
+
+      const { data, count, error } = await query;
+
+      if (error) {
+        console.error('Erro ao buscar clientes com envios:', error);
+      } else {
+        setClientsWithSubmissions(data || []);
+        if (count !== null) {
+          setTotalImportClientsCount(count);
+        }
+      }
+    } catch (err) {
+      console.error('Erro de conexão ao buscar clientes com envios:', err);
+    } finally {
+      setLoadingClientsWithSubmissions(false);
+    }
+  };
+
+  const handleSearchClientWithSubmissionsChange = (val: string) => {
+    setSearchClientWithSubmissions(val);
+    setImportClientsPage(1);
+  };
+
+  useEffect(() => {
+    if (currentScreen === 'importar-nf-xml' && importSubScreen === 'list') {
+      const handler = setTimeout(() => {
+        fetchClientsWithSubmissions(importClientsPage, searchClientWithSubmissions);
+      }, 300);
+      return () => clearTimeout(handler);
+    }
+  }, [currentScreen, importSubScreen, importClientsPage, searchClientWithSubmissions]);
+
   useEffect(() => {
     if (currentScreen === 'importar-nf-xml') {
       fetchImportClients();
@@ -565,6 +737,8 @@ const App: React.FC = () => {
       setSelectedClientId('');
       setClientSearchTerm('');
       setImportedFiles([]);
+      setImportSubScreen('list');
+      setImportClientsPage(1);
     }
   }, [currentScreen]);
 
@@ -776,6 +950,7 @@ const App: React.FC = () => {
       if (selectedClientId) {
         await fetchImportedFiles(selectedClientId);
       }
+      fetchChartData(selectedMonth, selectedYear);
 
       setTimeout(() => {
         setImportSuccess(false);
@@ -936,7 +1111,7 @@ const App: React.FC = () => {
                               setClientWhatsapp('');
                               setClientEmail('');
                               setClientErrors({});
-                              setCurrentScreen('cadastro-clientes');
+                              setCurrentScreen('lista-clientes');
                               setActiveNavItem('Cadastros');
                             }}
                             className="block w-full text-left px-4 py-2.5 text-sm text-textSecondary hover:text-textPrimary hover:bg-background rounded-xl transition-colors font-medium"
@@ -963,6 +1138,7 @@ const App: React.FC = () => {
                       setCurrentScreen('dashboard');
                     } else if (item.key === 'Importar NF e XML') {
                       setCurrentScreen('importar-nf-xml');
+                      setImportSubScreen('list');
                     }
                     setActiveNavItem(item.key);
                     setShowCadastrosDropdown(false);
@@ -1185,7 +1361,7 @@ const App: React.FC = () => {
                                 setClientWhatsapp('');
                                 setClientEmail('');
                                 setClientErrors({});
-                                setCurrentScreen('cadastro-clientes');
+                                setCurrentScreen('lista-clientes');
                                 setActiveNavItem('Cadastros');
                               }}
                               className="px-4 py-2 rounded-xl text-xs font-medium text-textSecondary hover:bg-surface hover:text-textPrimary"
@@ -1216,6 +1392,7 @@ const App: React.FC = () => {
                         setCurrentScreen('dashboard');
                       } else if (item.key === 'Importar NF e XML') {
                         setCurrentScreen('importar-nf-xml');
+                        setImportSubScreen('list');
                       }
                       setActiveNavItem(item.key);
                       setShowCadastrosDropdown(false);
@@ -1262,9 +1439,9 @@ const App: React.FC = () => {
                         <TrendingUp className="h-6 w-6" />
                       </div>
                       <div>
-                        <h2 className="text-2xl font-bold tracking-tight text-textPrimary">Acompanhamento de Importações</h2>
+                        <h2 className="text-2xl font-bold tracking-tight text-textPrimary">Envios de E-mails por Dia</h2>
                         <p className="text-sm text-textSecondary mt-1 max-w-md">
-                          Acompanhe todas as importações de XML e NFs do mês para seus clientes ou fornecedores
+                          Acompanhe a quantidade de documentos enviados por e-mail para seus clientes no mês selecionado
                         </p>
                       </div>
                     </div>
@@ -1328,6 +1505,13 @@ const App: React.FC = () => {
                     {/* Gráfico SVG customizado estilo Linha com Pontos (Mockup) */}
                     <div className="md:col-span-12 flex flex-col items-center justify-end relative h-[218px]">
 
+                      {/* Spinner de Carregamento Premium */}
+                      {loadingChart && (
+                        <div className="absolute inset-0 bg-surface/50 backdrop-blur-[1px] flex items-center justify-center z-20">
+                          <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                        </div>
+                      )}
+
                       {/* Tooltip flutuante sobre a coluna ativa */}
                       <AnimatePresence mode="wait">
                         <motion.div
@@ -1339,14 +1523,16 @@ const App: React.FC = () => {
                           className="absolute bg-textPrimary text-white text-xs font-bold px-4 py-2.5 rounded-[12px] shadow-lg flex flex-col items-center z-10"
                           style={{
                             top: `calc(${110 - (activeValue / maxVal) * 70}px - 35px)`,
-                            left: `calc(${(safeActiveBarIndex / (currentPeriodData.length - 1)) * 100}% - 24px)`,
+                            left: `calc(${(safeActiveBarIndex / (chartData.length - 1)) * 100}% - 24px)`,
                             transform: 'translateX(-50%)',
                           }}
                         >
                           <span className="text-[10px] text-textSecondary font-medium leading-none mb-1">
                             {activeLabel}
                           </span>
-                          <span className="text-sm font-semibold">${activeValue.toLocaleString()}</span>
+                          <span className="text-sm font-semibold">
+                            {activeValue === 1 ? '1 envio' : `${activeValue} envios`}
+                          </span>
                           {/* Seta do Tooltip */}
                           <div className="w-2.5 h-2.5 bg-textPrimary rotate-45 absolute -bottom-1 left-1/2 -translate-x-1/2" />
                         </motion.div>
@@ -1362,7 +1548,7 @@ const App: React.FC = () => {
                           <div className="w-full border-t border-dashed border-borderCustom/30" />
                         </div>
 
-                        {currentPeriodData.map((d, index) => {
+                        {chartData.map((d, index) => {
                           const isActive = index === safeActiveBarIndex;
                           const pct = d.value / maxVal;
                           const barHeight = pct * 70; // max 70px
@@ -1377,15 +1563,13 @@ const App: React.FC = () => {
                               <div className="absolute top-0 bottom-0 w-full hover:bg-black/0 cursor-pointer z-0" />
 
                               {/* Destaque de coluna ativa (coluna branca leve de fundo) */}
-                              <AnimatePresence>
-                                {isActive && (
-                                  <motion.div
-                                    layoutId="activeColBg"
-                                    className="absolute -top-6 bottom-0 w-7 md:w-9 bg-[#F4F6FA] border border-borderCustom/30 rounded-[24px] z-0"
-                                    transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                                  />
-                                )}
-                              </AnimatePresence>
+                              {isActive && (
+                                <motion.div
+                                  layoutId="activeColBg"
+                                  className="absolute -top-6 bottom-0 w-7 md:w-9 bg-[#F4F6FA] border border-borderCustom/30 rounded-[24px] z-0"
+                                  transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+                                />
+                              )}
 
                               {/* Render da Linha Vertical e do Ponto Azul */}
                               <div className="flex flex-col items-center justify-end relative h-40 w-full z-10">
@@ -1450,19 +1634,19 @@ const App: React.FC = () => {
                         {/* Proposals */}
                         <div className="flex flex-col">
                           <span className="text-[10px] text-textSecondary leading-none">Arquivos XML</span>
-                          <span className="text-2xl font-extrabold text-textPrimary mt-1.5">64</span>
+                          <span className="text-2xl font-extrabold text-textPrimary mt-1.5">{monthlyXmlCount}</span>
                         </div>
 
                         {/* Interviews */}
                         <div className="flex flex-col border-l border-borderCustom/60 pl-3">
                           <span className="text-[10px] text-textSecondary leading-none font-medium">Arquivos NFs</span>
-                          <span className="text-2xl font-extrabold text-primary mt-1.5">12</span>
+                          <span className="text-2xl font-extrabold text-primary mt-1.5">{monthlyPdfCount}</span>
                         </div>
 
                         {/* Hires */}
                         <div className="flex flex-col border-l border-borderCustom/60 pl-3">
                           <span className="text-[10px] text-textSecondary leading-none">Totais</span>
-                          <span className="text-2xl font-extrabold text-textPrimary mt-1.5">10</span>
+                          <span className="text-2xl font-extrabold text-textPrimary mt-1.5">{monthlyTotalCount}</span>
                         </div>
 
                       </div>
@@ -1470,17 +1654,27 @@ const App: React.FC = () => {
                       {/* Visualização de barras de tick estilizadas abaixo das métricas (estilo medidor analógico do mockup) */}
                       <div className="grid grid-cols-3 gap-3 h-10 items-end px-1">
 
-                        {/* Ticks Proposals: Coloridos Cinza claro */}
+                        {/* Ticks XML: Coloridos em Azul */}
                         <div className="flex space-x-[2px] justify-start h-full items-end">
-                          {Array.from({ length: 14 }).map((_, i) => (
-                            <div key={i} className="w-[1.5px] h-full bg-[#E8ECF4] rounded-full" style={{ height: `${20 + (i % 3) * 6}%` }} />
-                          ))}
+                          {Array.from({ length: 14 }).map((_, i) => {
+                            const activeTicks = Math.min(14, monthlyXmlCount);
+                            return (
+                              <div
+                                key={i}
+                                className={`w-[1.5px] rounded-full transition-colors duration-200`}
+                                style={{
+                                  height: `${20 + (i % 3) * 6}%`,
+                                  backgroundColor: i < activeTicks ? '#3B82F6' : '#E8ECF4'
+                                }}
+                              />
+                            );
+                          })}
                         </div>
 
-                        {/* Ticks Interviews: Coloridos Vermelho-Alaranjado */}
+                        {/* Ticks PDFs: Coloridos Vermelho-Alaranjado */}
                         <div className="flex space-x-[2px] justify-start h-full items-end pl-2.5">
                           {Array.from({ length: 14 }).map((_, i) => {
-                            const activeTicks = 6;
+                            const activeTicks = Math.min(14, monthlyPdfCount);
                             return (
                               <div
                                 key={i}
@@ -1494,10 +1688,10 @@ const App: React.FC = () => {
                           })}
                         </div>
 
-                        {/* Ticks Hires: Coloridos Preto/Navy */}
+                        {/* Ticks Totais: Coloridos Preto/Navy */}
                         <div className="flex space-x-[2px] justify-start h-full items-end pl-2.5">
                           {Array.from({ length: 14 }).map((_, i) => {
-                            const activeTicks = 4;
+                            const activeTicks = Math.min(14, monthlyTotalCount);
                             return (
                               <div
                                 key={i}
@@ -1670,6 +1864,213 @@ const App: React.FC = () => {
             </motion.main>
           )}
 
+          {currentScreen === 'lista-clientes' && (
+            <motion.div
+              key="lista-clientes"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -15 }}
+              transition={{ duration: 0.25 }}
+              className="w-full flex flex-col space-y-6"
+            >
+              {/* Seção Superior com Seta de Voltar e Título */}
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div className="flex items-center space-x-4">
+                  <button
+                    onClick={() => {
+                      setCurrentScreen('dashboard');
+                      setActiveNavItem('Início');
+                    }}
+                    className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-all hover:scale-105 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary flex items-center justify-center focus:outline-none"
+                    title="Voltar para o Início"
+                  >
+                    <ArrowLeft className="h-5 w-5 text-primary" />
+                  </button>
+                  <div>
+                    <h2 className="text-2xl font-bold tracking-tight text-textPrimary">Lista de Clientes</h2>
+                    <p className="text-sm text-textSecondary mt-0.5">Gerencie os clientes cadastrados no sistema</p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setEditingClient(null);
+                    setClientNome('');
+                    setClientEndereco('');
+                    setClientWhatsapp('');
+                    setClientEmail('');
+                    setClientErrors({});
+                    setCurrentScreen('cadastro-clientes');
+                  }}
+                  className="w-full sm:w-auto px-6 h-12 bg-primary hover:bg-primary-hover text-white font-bold text-xs rounded-btn flex items-center justify-center space-x-2 transition-all duration-200 hover:scale-[1.01] active:scale-95 shadow-md shadow-primary/20"
+                >
+                  <span>Novo Cliente</span>
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Filtro de Busca */}
+              <div className="bg-surface rounded-card border border-borderCustom p-5 shadow-cardShadow flex flex-col md:flex-row items-center gap-4">
+                <div className="relative w-full md:w-96">
+                  <input
+                    type="text"
+                    value={searchListQuery}
+                    onChange={(e) => handleSearchListChange(e.target.value)}
+                    placeholder="Buscar por nome ou WhatsApp..."
+                    className="w-full h-12 pl-12 pr-4 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm"
+                  />
+                  <Search className="absolute left-4 top-3.5 h-5 w-5 text-textSecondary/60 pointer-events-none" />
+                  {searchListQuery && (
+                    <button
+                      type="button"
+                      onClick={() => handleSearchListChange('')}
+                      className="absolute right-4 top-3.5 text-textSecondary hover:text-textPrimary"
+                    >
+                      <X className="h-5 w-5" />
+                    </button>
+                  )}
+                </div>
+                <div className="text-xs font-semibold text-textSecondary select-none">
+                  Total encontrado: {totalListClients} {totalListClients === 1 ? 'cliente' : 'clientes'}
+                </div>
+              </div>
+
+              {/* Grid / Tabela de Clientes */}
+              <div className="bg-surface rounded-card border border-borderCustom p-6 shadow-cardShadow min-h-[400px] flex flex-col justify-between">
+                <div className="flex-grow min-h-0">
+                  {loadingListClients ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-textSecondary">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mb-3"></div>
+                      <p className="text-sm font-medium">Carregando clientes...</p>
+                    </div>
+                  ) : listClients.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30 w-full">
+                      <p className="text-sm font-bold">Nenhum cliente encontrado</p>
+                      <p className="text-xs mt-1 text-textSecondary/60">Tente buscar por outro termo ou cadastre um novo cliente.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-x-auto">
+                      <table className="w-full text-left border-collapse border-spacing-0">
+                        <thead>
+                          <tr className="bg-[#F4F6FA] border-b border-borderCustom text-[10px] font-bold text-textSecondary uppercase tracking-wider">
+                            <th className="px-6 py-4">Nome completo</th>
+                            <th className="px-6 py-4">WhatsApp</th>
+                            <th className="px-6 py-4">E-mail</th>
+                            <th className="px-6 py-4">Endereço</th>
+                            <th className="px-6 py-4 text-center">Ações</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-borderCustom/40">
+                          {listClients.map((client, index) => (
+                            <tr
+                              key={client.id || index}
+                              onClick={() => handleEditClientClick(client)}
+                              className={`hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${
+                                index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                              }`}
+                            >
+                              <td className="px-6 py-3.5 text-xs font-bold text-textPrimary uppercase truncate max-w-[200px]" title={client.nome}>
+                                {client.nome}
+                              </td>
+                              <td className="px-6 py-3.5 text-xs font-semibold text-textSecondary truncate">
+                                {formatWhatsapp(client.whatsapp)}
+                              </td>
+                              <td className="px-6 py-3.5 text-xs font-semibold text-textSecondary truncate max-w-[150px]" title={client.email}>
+                                {client.email}
+                              </td>
+                              <td className="px-6 py-3.5 text-xs font-semibold text-textSecondary truncate max-w-[250px]" title={client.endereco || '-'}>
+                                {client.endereco || '-'}
+                              </td>
+                              <td className="px-6 py-3.5 text-xs font-bold text-center" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  onClick={() => handleEditClientClick(client)}
+                                  className="p-2 bg-[#ECEFF6] hover:bg-primary/10 text-textSecondary hover:text-primary rounded-xl transition-all duration-150 focus:outline-none"
+                                  title="Editar Cliente"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Paginação */}
+                {!loadingListClients && totalListClients > 12 && (() => {
+                  const totalPages = Math.max(1, Math.ceil(totalListClients / 12));
+                  const getPageNumbers = () => {
+                    const pages = [];
+                    let startPage = Math.max(1, currentPage - 2);
+                    let endPage = Math.min(totalPages, startPage + 4);
+                    if (endPage - startPage < 4) {
+                      startPage = Math.max(1, endPage - 4);
+                    }
+                    for (let i = startPage; i <= endPage; i++) {
+                      pages.push(i);
+                    }
+                    return pages;
+                  };
+
+                  return (
+                    <div className="flex flex-col sm:flex-row items-center justify-between border-t border-borderCustom/60 pt-5 mt-6 gap-4">
+                      {/* Esquerda: Página X de Y · Z registros */}
+                      <div className="text-xs font-semibold text-textSecondary select-none">
+                        Página <span className="font-bold text-textPrimary">{currentPage}</span> de <span className="font-bold text-textPrimary">{totalPages}</span> · <span className="text-textSecondary/80">{totalListClients} registros</span>
+                      </div>
+
+                      {/* Direita: Botões numéricos de navegação */}
+                      <div className="flex items-center space-x-1.5">
+                        {/* Botão Anterior (<) */}
+                        <button
+                          type="button"
+                          disabled={currentPage === 1}
+                          onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                          className="h-8 w-8 border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary disabled:opacity-40 disabled:cursor-not-allowed rounded-lg flex items-center justify-center transition-colors duration-150 focus:outline-none"
+                          title="Página Anterior"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+
+                        {/* Números das Páginas */}
+                        {getPageNumbers().map((pageNumber) => {
+                          const isActive = pageNumber === currentPage;
+                          return (
+                            <button
+                              key={pageNumber}
+                              type="button"
+                              onClick={() => setCurrentPage(pageNumber)}
+                              className={`h-8 w-8 text-xs font-bold rounded-lg flex items-center justify-center transition-all duration-150 focus:outline-none ${
+                                isActive
+                                  ? 'bg-primary text-white shadow-sm hover:bg-primary/95 scale-105'
+                                  : 'border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary hover:text-textPrimary'
+                              }`}
+                            >
+                              {pageNumber}
+                            </button>
+                          );
+                        })}
+
+                        {/* Botão Próximo (>) */}
+                        <button
+                          type="button"
+                          disabled={currentPage === totalPages}
+                          onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                          className="h-8 w-8 border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary disabled:opacity-40 disabled:cursor-not-allowed rounded-lg flex items-center justify-center transition-colors duration-150 focus:outline-none"
+                          title="Próxima Página"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </motion.div>
+          )}
+
           {currentScreen === 'cadastro-clientes' && (
             <motion.div
               key="cadastro-clientes"
@@ -1690,8 +2091,7 @@ const App: React.FC = () => {
                       setClientWhatsapp('');
                       setClientEmail('');
                       setClientErrors({});
-                      setCurrentScreen('dashboard');
-                      setActiveNavItem('Início');
+                      setCurrentScreen('lista-clientes');
                     }}
                     className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-all hover:scale-105 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary flex items-center justify-center focus:outline-none"
                     title="Voltar para o Início"
@@ -1852,8 +2252,7 @@ const App: React.FC = () => {
                         setClientWhatsapp('');
                         setClientEmail('');
                         setClientErrors({});
-                        setCurrentScreen('dashboard');
-                        setActiveNavItem('Início');
+                        setCurrentScreen('lista-clientes');
                       }}
                       className="w-full sm:w-auto px-6 h-12 border border-borderCustom hover:bg-background text-textSecondary hover:text-textPrimary font-bold text-sm rounded-btn transition-all duration-200 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
                     >
@@ -1890,411 +2289,633 @@ const App: React.FC = () => {
               transition={{ duration: 0.25 }}
               className="w-full"
             >
-              {/* Seção Superior com Seta de Voltar e Título */}
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center space-x-4">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCurrentScreen('dashboard');
-                      setActiveNavItem('Início');
-                    }}
-                    className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-all hover:scale-105 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary flex items-center justify-center focus:outline-none"
-                    title="Voltar para o Início"
-                  >
-                    <ArrowLeft className="h-5 w-5 text-primary" />
-                  </button>
-                  <div>
-                    <h2 className="text-2xl font-bold tracking-tight text-textPrimary">
-                      Importação de NF e XML
-                    </h2>
-                    <p className="text-sm text-textSecondary mt-0.5">
-                      Importe arquivos do tipo XML ou PDF vinculados a um cliente específico
-                    </p>
+              {importSubScreen === 'list' ? (
+                <div className="w-full flex flex-col space-y-6">
+                  {/* Seção Superior com Seta de Voltar e Título */}
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <div className="flex items-center space-x-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCurrentScreen('dashboard');
+                          setActiveNavItem('Início');
+                        }}
+                        className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-all hover:scale-105 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary flex items-center justify-center focus:outline-none"
+                        title="Voltar para o Início"
+                      >
+                        <ArrowLeft className="h-5 w-5 text-primary" />
+                      </button>
+                      <div>
+                        <h2 className="text-2xl font-bold tracking-tight text-textPrimary">Clientes com Envios</h2>
+                        <p className="text-sm text-textSecondary mt-0.5">Selecione um cliente para gerenciar suas importações e envios</p>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setSelectedClientId('');
+                        setClientSearchTerm('');
+                        setImportSubScreen('form');
+                      }}
+                      className="w-full sm:w-auto px-6 h-12 bg-primary hover:bg-primary-hover text-white font-bold text-xs rounded-btn flex items-center justify-center space-x-2 transition-all duration-200 hover:scale-[1.01] active:scale-95 shadow-md shadow-primary/20"
+                    >
+                      <span>Novas Importações</span>
+                      <Plus className="h-4 w-4" />
+                    </button>
                   </div>
-                </div>
-              </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                {/* Card do Formulário de Importação */}
-                <div className="lg:col-span-5 bg-surface rounded-card border border-borderCustom p-6 md:p-8 shadow-cardShadow relative overflow-hidden">
-                
-                {/* Alerta de Sucesso */}
-                <AnimatePresence>
-                  {importSuccess && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-                      animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
-                      exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                      className="bg-green-500/10 border border-green-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-green-700 overflow-hidden"
-                    >
-                      <div className="h-8 w-8 rounded-full bg-green-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
-                        <Check className="h-4.5 w-4.5 stroke-[3]" />
-                      </div>
-                      <div>
-                        <p className="font-bold text-sm">{importSuccessMessage}</p>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {/* Alerta de Erro */}
-                <AnimatePresence>
-                  {importError && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0, marginBottom: 0 }}
-                      animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
-                      exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                      className="bg-red-500/10 border border-red-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-red-700 overflow-hidden"
-                    >
-                      <div className="h-8 w-8 rounded-full bg-red-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
-                        <span className="font-bold font-sans">!</span>
-                      </div>
-                      <div>
-                        <p className="font-bold text-sm">Erro na importação</p>
-                        <p className="text-xs text-red-700/80">{importError}</p>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                <form onSubmit={handleImportFileSubmit} className="space-y-6">
-                  {/* Seleção do Cliente (Autocomplete Combobox) */}
-                  <div className="flex flex-col space-y-2 relative">
-                    <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
-                      Cliente <span className="text-primary">*</span>
-                    </label>
-                    <div className="relative">
+                  {/* Filtro de Busca */}
+                  <div className="bg-surface rounded-card border border-borderCustom p-5 shadow-cardShadow flex flex-col md:flex-row items-center gap-4">
+                    <div className="relative w-full md:w-96">
                       <input
                         type="text"
-                        value={clientSearchTerm}
-                        onChange={(e) => {
-                          setClientSearchTerm(e.target.value);
-                          setShowClientSuggestions(true);
-                          if (!e.target.value) {
-                            setSelectedClientId('');
-                          }
-                        }}
-                        onFocus={() => setShowClientSuggestions(true)}
-                        onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
-                        placeholder="Pesquise por nome do cliente..."
-                        className="w-full h-12 px-5 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm"
+                        value={searchClientWithSubmissions}
+                        onChange={(e) => handleSearchClientWithSubmissionsChange(e.target.value)}
+                        placeholder="Buscar cliente por nome..."
+                        className="w-full h-12 pl-12 pr-4 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm"
                       />
-                      <Search className="absolute right-4 top-3.5 h-5 w-5 text-textSecondary/60 pointer-events-none" />
-                      
-                      {selectedClientId && (
+                      <Search className="absolute left-4 top-3.5 h-5 w-5 text-textSecondary/60 pointer-events-none" />
+                      {searchClientWithSubmissions && (
                         <button
                           type="button"
-                          onClick={() => {
-                            setSelectedClientId('');
-                            setClientSearchTerm('');
-                          }}
-                          className="absolute right-12 top-3.5 text-textSecondary hover:text-textPrimary"
+                          onClick={() => handleSearchClientWithSubmissionsChange('')}
+                          className="absolute right-4 top-3.5 text-textSecondary hover:text-textPrimary"
                         >
                           <X className="h-5 w-5" />
                         </button>
                       )}
                     </div>
-
-                    {/* Lista Suspeita Autocomplete */}
-                    {showClientSuggestions && (
-                      <div className="absolute left-0 right-0 top-full mt-2 bg-surface border border-borderCustom rounded-card shadow-dropdownShadow z-30 max-h-60 overflow-y-auto p-2">
-                        {importClients.filter(c =>
-                          c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase())
-                        ).length === 0 ? (
-                          <div className="px-4 py-3 text-xs text-textSecondary text-center">
-                            Nenhum cliente encontrado
-                          </div>
-                        ) : (
-                          importClients
-                            .filter(c => c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase()))
-                            .map((client) => (
-                              <button
-                                key={client.id}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedClientId(client.id);
-                                  setClientSearchTerm(client.nome.toUpperCase());
-                                  setShowClientSuggestions(false);
-                                }}
-                                className={`w-full text-left px-4 py-2.5 text-sm rounded-xl transition-colors font-medium flex items-center justify-between ${
-                                  selectedClientId === client.id
-                                    ? 'bg-primary/10 text-primary'
-                                    : 'text-textSecondary hover:text-textPrimary hover:bg-background'
-                                }`}
-                              >
-                                <span className="uppercase">{client.nome}</span>
-                                {selectedClientId === client.id && <Check className="h-4.5 w-4.5" />}
-                              </button>
-                            ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Campo de Upload de Arquivo */}
-                  <div className="flex flex-col space-y-2">
-                    <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
-                      Arquivo (XML ou PDF) <span className="text-primary">*</span>
-                    </label>
-
-                    {/* Drag and Drop Zone */}
-                    <div
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        setDragActive(true);
-                      }}
-                      onDragLeave={() => setDragActive(false)}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        setDragActive(false);
-                        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                          setImportFile(e.dataTransfer.files[0]);
-                        }
-                      }}
-                      className={`border-2 border-dashed rounded-card p-8 flex flex-col items-center justify-center text-center transition-all duration-200 cursor-pointer min-h-[180px] ${
-                        dragActive
-                          ? 'border-primary bg-primary/5 shadow-inner'
-                          : importFile
-                          ? 'border-green-500/40 bg-green-500/5'
-                          : 'border-borderCustom hover:border-primary/50 hover:bg-primary/5'
-                      }`}
-                    >
-                      <input
-                        type="file"
-                        id="file-upload-input"
-                        accept=".xml,.pdf"
-                        onChange={(e) => {
-                          if (e.target.files && e.target.files[0]) {
-                            setImportFile(e.target.files[0]);
-                          }
-                        }}
-                        className="hidden"
-                      />
-                      <label htmlFor="file-upload-input" className="cursor-pointer w-full h-full flex flex-col items-center justify-center">
-                        {importFile ? (
-                          <div className="flex flex-col items-center space-y-3">
-                            <div className="h-14 w-14 rounded-2xl bg-green-500/10 flex items-center justify-center text-green-600">
-                              {importFile.name.split('.').pop()?.toLowerCase() === 'xml' ? (
-                                <FileCode className="h-8 w-8" />
-                              ) : (
-                                <FileText className="h-8 w-8" />
-                              )}
-                            </div>
-                            <div>
-                              <p className="text-sm font-bold text-textPrimary max-w-md truncate px-4">
-                                {importFile.name}
-                              </p>
-                              <p className="text-xs text-textSecondary mt-1">
-                                {formatFileSize(importFile.size)}
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setImportFile(null);
-                              }}
-                              className="px-4 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-btn text-xs font-semibold flex items-center space-x-1.5 transition-colors"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              <span>Remover arquivo</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="flex flex-col items-center space-y-3">
-                            <div className="h-14 w-14 rounded-2xl bg-background border border-borderCustom flex items-center justify-center text-textSecondary/60 shadow-sm">
-                              <UploadCloud className="h-7 w-7 text-primary" />
-                            </div>
-                            <div>
-                              <p className="text-sm font-bold text-textPrimary">
-                                Arraste e solte o arquivo aqui
-                              </p>
-                              <p className="text-xs text-textSecondary mt-1">
-                                ou clique para selecionar do seu computador
-                              </p>
-                            </div>
-                            <span className="text-[10px] text-textSecondary bg-background px-3 py-1 rounded-badge border border-borderCustom/60 font-semibold uppercase tracking-wider font-sans">
-                              XML ou PDF • Máximo 10MB
-                            </span>
-                          </div>
-                        )}
-                      </label>
+                    <div className="text-xs font-semibold text-textSecondary select-none">
+                      Total encontrado: {totalImportClientsCount} {totalImportClientsCount === 1 ? 'cliente' : 'clientes'}
                     </div>
                   </div>
 
-                  {/* Botão de Enviar */}
-                  <div className="pt-4 border-t border-borderCustom flex items-center justify-end">
-                    <button
-                      type="submit"
-                      disabled={importing || !selectedClientId || !importFile}
-                      className="w-full sm:w-auto px-8 h-12 bg-primary hover:bg-primary-hover disabled:bg-disabledCustom disabled:cursor-not-allowed text-white font-bold text-sm rounded-btn transition-all duration-200 hover:scale-[1.02] active:scale-95 shadow-md shadow-primary/20 flex items-center justify-center space-x-2"
-                    >
-                      {importing ? (
-                        <>
-                          <Loader2 className="h-5 w-5 animate-spin" />
-                          <span>Importando Arquivo...</span>
-                        </>
+                  {/* Grid / Tabela de Clientes com Envios */}
+                  <div className="bg-surface rounded-card border border-borderCustom p-6 shadow-cardShadow min-h-[350px] flex flex-col justify-between">
+                    <div className="flex-grow min-h-0">
+                      {loadingClientsWithSubmissions ? (
+                        <div className="flex flex-col items-center justify-center py-20 text-textSecondary">
+                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mb-3 text-primary"></div>
+                          <p className="text-sm font-medium">Carregando clientes com envios...</p>
+                        </div>
+                      ) : clientsWithSubmissions.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-20 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30 w-full">
+                          <p className="text-sm font-bold">Nenhum cliente com envios encontrado</p>
+                          <p className="text-xs mt-1 text-textSecondary/60">
+                            {searchClientWithSubmissions 
+                              ? 'Tente buscar por outro nome ou realize uma nova importação.'
+                              : 'Realize a primeira importação clicando no botão "Novas Importações".'}
+                          </p>
+                        </div>
                       ) : (
-                        <>
-                          <span>Importar Arquivo</span>
-                          <Check className="h-4.5 w-4.5" />
-                        </>
+                        <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-x-auto">
+                          <table className="w-full text-left border-collapse border-spacing-0">
+                            <thead>
+                              <tr className="bg-[#F4F6FA] border-b border-borderCustom text-[10px] font-bold text-textSecondary uppercase tracking-wider">
+                                <th className="px-6 py-4">Nome completo</th>
+                                <th className="px-6 py-4">WhatsApp</th>
+                                <th className="px-6 py-4">E-mail</th>
+                                <th className="px-6 py-4 text-center">Arquivos Importados</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-borderCustom/40">
+                              {clientsWithSubmissions.map((client, index) => (
+                                <tr
+                                  key={client.id || index}
+                                  onClick={() => {
+                                    setSelectedClientId(client.id);
+                                    setClientSearchTerm(client.nome.toUpperCase());
+                                    setImportSubScreen('form');
+                                  }}
+                                  className={`hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${
+                                    index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                                  }`}
+                                >
+                                  <td className="px-6 py-3.5 text-xs font-bold text-textPrimary uppercase truncate max-w-[200px]" title={client.nome}>
+                                    {client.nome}
+                                  </td>
+                                  <td className="px-6 py-3.5 text-xs font-semibold text-textSecondary truncate">
+                                    {formatWhatsapp(client.whatsapp)}
+                                  </td>
+                                  <td className="px-6 py-3.5 text-xs font-semibold text-textSecondary truncate max-w-[150px]" title={client.email}>
+                                    {client.email}
+                                  </td>
+                                  <td className="px-6 py-3.5 text-xs font-bold text-center">
+                                    <div className="flex items-center justify-center space-x-2">
+                                      {(() => {
+                                        const xmlCount = client.arquivos_importados
+                                          ? client.arquivos_importados.filter((f: any) => f.tipo_arquivo === 'xml').length
+                                          : 0;
+                                        const pdfCount = client.arquivos_importados
+                                          ? client.arquivos_importados.filter((f: any) => f.tipo_arquivo === 'pdf').length
+                                          : 0;
+                                        return (
+                                          <>
+                                            {xmlCount > 0 && (
+                                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/10 text-blue-600 border border-blue-500/20">
+                                                {xmlCount} XML
+                                              </span>
+                                            )}
+                                            {pdfCount > 0 && (
+                                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-500/10 text-red-600 border border-red-500/20">
+                                                {pdfCount} PDF
+                                              </span>
+                                            )}
+                                            {xmlCount === 0 && pdfCount === 0 && (
+                                              <span className="text-textSecondary/40 font-normal">-</span>
+                                            )}
+                                          </>
+                                        );
+                                      })()}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       )}
-                    </button>
-                  </div>
-                </form>
-                </div>
-
-                {/* Grid de Histórico de Arquivos */}
-                <div className="lg:col-span-7 bg-surface rounded-card border border-borderCustom p-6 md:p-8 shadow-cardShadow flex flex-col">
-                <div className="mb-6">
-                  <h3 className="text-lg font-bold tracking-tight text-textPrimary">
-                    Histórico de Arquivos Importados
-                  </h3>
-                  <p className="text-xs text-textSecondary mt-0.5">
-                    Visualize e gerencie os documentos que já foram importados do cliente selecionado
-                  </p>
-                </div>
-
-                {!selectedClientId ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
-                    <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
-                      <File className="h-6 w-6" />
                     </div>
-                    <p className="text-xs font-semibold">Nenhum cliente selecionado</p>
-                    <p className="text-[10px] mt-1 text-textSecondary/60">Selecione um cliente no formulário acima para listar seus arquivos.</p>
-                  </div>
-                ) : loadingImportedFiles ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-textSecondary">
-                    <Loader2 className="h-6 w-6 animate-spin text-primary mb-3" />
-                    <p className="text-xs font-medium">Carregando histórico de arquivos...</p>
-                  </div>
-                ) : importedFiles.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
-                    <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
-                      <File className="h-6 w-6" />
-                    </div>
-                    <p className="text-xs font-semibold">Nenhum arquivo importado para este cliente</p>
-                    <p className="text-[10px] mt-1 text-textSecondary/60">Os novos arquivos importados aparecerão neste grid.</p>
-                  </div>
-                ) : (
-                  <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-y-auto max-h-[400px]">
-                    {/* Cabeçalho da Tabela */}
-                    <div className="grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 bg-[#F4F6FA] border-b border-borderCustom px-4 py-3 text-[10px] font-bold text-textSecondary uppercase tracking-wider">
-                      <div>Nome do Arquivo</div>
-                      <div>Tipo</div>
-                      <div>Tamanho</div>
-                      <div>Importação</div>
-                      <div>Envios</div>
-                      <div className="text-right">Ações</div>
-                    </div>
-                    
-                    {/* Lista de Arquivos */}
-                    <div className="divide-y divide-borderCustom/40">
-                      {importedFiles.map((file, index) => (
-                        <div
-                          key={file.id}
-                          className={`grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 px-4 py-3.5 items-center hover:bg-[#DCE3EE] transition-colors duration-150 ${
-                            index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
-                          }`}
-                        >
-                          {/* Nome */}
-                          <div className="text-xs font-bold text-textPrimary truncate" title={file.nome_arquivo}>
-                            {file.nome_arquivo}
+
+                    {/* Paginação */}
+                    {!loadingClientsWithSubmissions && totalImportClientsCount > 12 && (() => {
+                      const totalPages = Math.max(1, Math.ceil(totalImportClientsCount / 12));
+                      const getPageNumbers = () => {
+                        const pages = [];
+                        let startPage = Math.max(1, importClientsPage - 2);
+                        let endPage = Math.min(totalPages, startPage + 4);
+                        if (endPage - startPage < 4) {
+                          startPage = Math.max(1, endPage - 4);
+                        }
+                        for (let i = startPage; i <= endPage; i++) {
+                          pages.push(i);
+                        }
+                        return pages;
+                      };
+
+                      return (
+                        <div className="flex flex-col sm:flex-row items-center justify-between border-t border-borderCustom/60 pt-5 mt-6 gap-4">
+                          {/* Esquerda: Página X de Y · Z registros */}
+                          <div className="text-xs font-semibold text-textSecondary select-none">
+                            Página <span className="font-bold text-textPrimary">{importClientsPage}</span> de <span className="font-bold text-textPrimary">{totalPages}</span> · <span className="text-textSecondary/80">{totalImportClientsCount} registros</span>
                           </div>
 
-                          {/* Tipo */}
-                          <div className="text-xs">
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded-badge text-[10px] font-bold ${
-                              file.tipo_arquivo === 'xml'
-                                ? 'bg-blue-500/10 text-blue-600'
-                                : 'bg-red-500/10 text-red-600'
-                            }`}>
-                              {file.tipo_arquivo.toUpperCase()}
-                            </span>
-                          </div>
-
-                          {/* Tamanho */}
-                          <div className="text-xs text-textSecondary font-semibold">
-                            {formatFileSize(file.tamanho_arquivo)}
-                          </div>
-
-                          {/* Data */}
-                          <div className="text-xs text-textSecondary font-medium">
-                            {formatImportDate(file.created_at)}
-                          </div>
-
-                          {/* Envios */}
-                          <div className="text-xs flex flex-col space-y-1">
-                            <div className="flex items-center space-x-1">
-                              <span className="text-[10px] text-textSecondary font-semibold">E-mail:</span>
-                              <span className={file.enviado_email_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
-                                {file.enviado_email_at ? formatImportDate(file.enviado_email_at) : 'Não enviado'}
-                              </span>
-                            </div>
-                            <div className="flex items-center space-x-1">
-                              <span className="text-[10px] text-textSecondary font-semibold">Whats:</span>
-                              <span className={file.enviado_whatsapp_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
-                                {file.enviado_whatsapp_at ? formatImportDate(file.enviado_whatsapp_at) : 'Não enviado'}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Ações */}
-                          <div className="flex items-center justify-end space-x-1">
+                          {/* Direita: Botões numéricos de navegação */}
+                          <div className="flex items-center space-x-1.5">
+                            {/* Botão Anterior (<) */}
                             <button
                               type="button"
-                              onClick={() => handleDownloadFile(file.caminho_storage, file.nome_arquivo)}
-                              className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
-                              title="Baixar Arquivo"
+                              disabled={importClientsPage === 1}
+                              onClick={() => setImportClientsPage(prev => Math.max(prev - 1, 1))}
+                              className="h-8 w-8 border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary disabled:opacity-40 disabled:cursor-not-allowed rounded-lg flex items-center justify-center transition-colors duration-150 focus:outline-none"
+                              title="Página Anterior"
                             >
-                              <Download className="h-4 w-4" />
+                              <ChevronLeft className="h-4 w-4" />
                             </button>
+
+                            {/* Números das Páginas */}
+                            {getPageNumbers().map((pageNumber) => {
+                              const isActive = pageNumber === importClientsPage;
+                              return (
+                                <button
+                                  key={pageNumber}
+                                  type="button"
+                                  onClick={() => setImportClientsPage(pageNumber)}
+                                  className={`h-8 w-8 text-xs font-bold rounded-lg flex items-center justify-center transition-all duration-150 focus:outline-none ${
+                                    isActive
+                                      ? 'bg-primary text-white shadow-sm hover:bg-primary/95 scale-105'
+                                      : 'border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary hover:text-textPrimary'
+                                  }`}
+                                >
+                                  {pageNumber}
+                                </button>
+                              );
+                            })}
+
+                            {/* Botão Próximo (>) */}
                             <button
                               type="button"
-                              disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
-                              onClick={() => handleSendEmail(file)}
-                              className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                              title="Enviar por E-mail"
+                              disabled={importClientsPage === totalPages}
+                              onClick={() => setImportClientsPage(prev => Math.min(prev + 1, totalPages))}
+                              className="h-8 w-8 border border-borderCustom bg-surface hover:bg-[#F4F6FA] text-textSecondary disabled:opacity-40 disabled:cursor-not-allowed rounded-lg flex items-center justify-center transition-colors duration-150 focus:outline-none"
+                              title="Próxima Página"
                             >
-                              {sendingEmailId === file.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                              ) : (
-                                <Mail className="h-4 w-4" />
-                              )}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
-                              onClick={() => handleSendWhatsapp(file)}
-                              className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                              title="Enviar por WhatsApp"
-                            >
-                              {sendingWhatsappId === file.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                              ) : (
-                                <MessageSquare className="h-4 w-4" />
-                              )}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteImportedFile(file.id, file.caminho_storage)}
-                              className="p-2 bg-surface hover:bg-red-50 border border-borderCustom hover:border-red-200 rounded-full text-textSecondary hover:text-red-500 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
-                              title="Excluir Arquivo"
-                            >
-                              <Trash2 className="h-4 w-4" />
+                              <ChevronRight className="h-4 w-4" />
                             </button>
                           </div>
                         </div>
-                      ))}
+                      );
+                    })()}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Seção Superior com Seta de Voltar e Título */}
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center space-x-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImportSubScreen('list');
+                        }}
+                        className="p-3 bg-surface hover:bg-background border border-borderCustom rounded-full transition-all hover:scale-105 active:scale-95 duration-200 shadow-sm text-textSecondary hover:text-textPrimary flex items-center justify-center focus:outline-none"
+                        title="Voltar para a lista de clientes"
+                      >
+                        <ArrowLeft className="h-5 w-5 text-primary" />
+                      </button>
+                      <div>
+                        <h2 className="text-2xl font-bold tracking-tight text-textPrimary">
+                          Importação de NF e XML
+                        </h2>
+                        <p className="text-sm text-textSecondary mt-0.5">
+                          Importe arquivos do tipo XML ou PDF vinculados a um cliente específico
+                        </p>
+                      </div>
                     </div>
                   </div>
-                )}
-                </div>
 
-              </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                    {/* Card do Formulário de Importação */}
+                    <div className="lg:col-span-5 bg-surface rounded-card border border-borderCustom p-6 md:p-8 shadow-cardShadow relative overflow-hidden">
+                    
+                    {/* Alerta de Sucesso */}
+                    <AnimatePresence>
+                      {importSuccess && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                          animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
+                          exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                          className="bg-green-500/10 border border-green-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-green-700 overflow-hidden"
+                        >
+                          <div className="h-8 w-8 rounded-full bg-green-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
+                            <Check className="h-4.5 w-4.5 stroke-[3]" />
+                          </div>
+                          <div>
+                            <p className="font-bold text-sm">{importSuccessMessage}</p>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    {/* Alerta de Erro */}
+                    <AnimatePresence>
+                      {importError && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                          animate={{ opacity: 1, height: 'auto', marginBottom: 24 }}
+                          exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                          className="bg-red-500/10 border border-red-500/20 rounded-[20px] p-4 flex items-center space-x-3 text-red-700 overflow-hidden"
+                        >
+                          <div className="h-8 w-8 rounded-full bg-red-500 text-white flex items-center justify-center shadow-sm flex-shrink-0">
+                            <span className="font-bold font-sans">!</span>
+                          </div>
+                          <div>
+                            <p className="font-bold text-sm">Erro na importação</p>
+                            <p className="text-xs text-red-700/80">{importError}</p>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    <form onSubmit={handleImportFileSubmit} className="space-y-6">
+                      {/* Seleção do Cliente (Autocomplete Combobox) */}
+                      <div className="flex flex-col space-y-2 relative">
+                        <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
+                          Cliente <span className="text-primary">*</span>
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={clientSearchTerm}
+                            onChange={(e) => {
+                              setClientSearchTerm(e.target.value);
+                              setShowClientSuggestions(true);
+                              if (!e.target.value) {
+                                setSelectedClientId('');
+                              }
+                            }}
+                            onFocus={() => setShowClientSuggestions(true)}
+                            onBlur={() => setTimeout(() => setShowClientSuggestions(false), 200)}
+                            placeholder="Pesquise por nome do cliente..."
+                            className="w-full h-12 px-5 text-sm bg-background border border-borderCustom rounded-input focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 placeholder:text-textSecondary/40 shadow-sm"
+                          />
+                          <Search className="absolute right-4 top-3.5 h-5 w-5 text-textSecondary/60 pointer-events-none" />
+                          
+                          {selectedClientId && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedClientId('');
+                                setClientSearchTerm('');
+                              }}
+                              className="absolute right-12 top-3.5 text-textSecondary hover:text-textPrimary"
+                            >
+                              <X className="h-5 w-5" />
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Lista Suspeita Autocomplete */}
+                        {showClientSuggestions && (
+                          <div className="absolute left-0 right-0 top-full mt-2 bg-surface border border-borderCustom rounded-card shadow-dropdownShadow z-30 max-h-60 overflow-y-auto p-2">
+                            {importClients.filter(c =>
+                              c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase())
+                            ).length === 0 ? (
+                              <div className="px-4 py-3 text-xs text-textSecondary text-center">
+                                Nenhum cliente encontrado
+                              </div>
+                            ) : (
+                              importClients
+                                .filter(c => c.nome.toLowerCase().includes(clientSearchTerm.toLowerCase()))
+                                .map((client) => (
+                                  <button
+                                    key={client.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedClientId(client.id);
+                                      setClientSearchTerm(client.nome.toUpperCase());
+                                      setShowClientSuggestions(false);
+                                    }}
+                                    className={`w-full text-left px-4 py-2.5 text-sm rounded-xl transition-colors font-medium flex items-center justify-between ${
+                                      selectedClientId === client.id
+                                        ? 'bg-primary/10 text-primary'
+                                        : 'text-textSecondary hover:text-textPrimary hover:bg-background'
+                                    }`}
+                                  >
+                                    <span className="uppercase">{client.nome}</span>
+                                    {selectedClientId === client.id && <Check className="h-4.5 w-4.5" />}
+                                  </button>
+                                ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Campo de Upload de Arquivo */}
+                      <div className="flex flex-col space-y-2">
+                        <label className="text-xs font-bold text-textPrimary uppercase tracking-wider pl-1">
+                          Arquivo (XML ou PDF) <span className="text-primary">*</span>
+                        </label>
+
+                        {/* Drag and Drop Zone */}
+                        <div
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            setDragActive(true);
+                          }}
+                          onDragLeave={() => setDragActive(false)}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            setDragActive(false);
+                            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                              setImportFile(e.dataTransfer.files[0]);
+                            }
+                          }}
+                          className={`border-2 border-dashed rounded-card p-8 flex flex-col items-center justify-center text-center transition-all duration-200 cursor-pointer min-h-[180px] ${
+                            dragActive
+                              ? 'border-primary bg-primary/5 shadow-inner'
+                              : importFile
+                              ? 'border-green-500/40 bg-green-500/5'
+                              : 'border-borderCustom hover:border-primary/50 hover:bg-primary/5'
+                          }`}
+                        >
+                          <input
+                            type="file"
+                            id="file-upload-input"
+                            accept=".xml,.pdf"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files[0]) {
+                                setImportFile(e.target.files[0]);
+                              }
+                            }}
+                            className="hidden"
+                          />
+                          <label htmlFor="file-upload-input" className="cursor-pointer w-full h-full flex flex-col items-center justify-center">
+                            {importFile ? (
+                              <div className="flex flex-col items-center space-y-3">
+                                <div className="h-14 w-14 rounded-2xl bg-green-500/10 flex items-center justify-center text-green-600">
+                                  {importFile.name.split('.').pop()?.toLowerCase() === 'xml' ? (
+                                    <FileCode className="h-8 w-8" />
+                                  ) : (
+                                    <FileText className="h-8 w-8" />
+                                  )}
+                                </div>
+                                <div>
+                                  <p className="text-sm font-bold text-textPrimary max-w-md truncate px-4">
+                                    {importFile.name}
+                                  </p>
+                                  <p className="text-xs text-textSecondary mt-1">
+                                    {formatFileSize(importFile.size)}
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setImportFile(null);
+                                  }}
+                                  className="px-4 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-btn text-xs font-semibold flex items-center space-x-1.5 transition-colors"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  <span>Remover arquivo</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center space-y-3">
+                                <div className="h-14 w-14 rounded-2xl bg-background border border-borderCustom flex items-center justify-center text-textSecondary/60 shadow-sm">
+                                  <UploadCloud className="h-7 w-7 text-primary" />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-bold text-textPrimary">
+                                    Arraste e solte o arquivo aqui
+                                  </p>
+                                  <p className="text-xs text-textSecondary mt-1">
+                                    ou clique para selecionar do seu computador
+                                  </p>
+                                </div>
+                                <span className="text-[10px] text-textSecondary bg-background px-3 py-1 rounded-badge border border-borderCustom/60 font-semibold uppercase tracking-wider font-sans">
+                                  XML ou PDF • Máximo 10MB
+                                </span>
+                              </div>
+                            )}
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Botão de Enviar */}
+                      <div className="pt-4 border-t border-borderCustom flex items-center justify-end">
+                        <button
+                          type="submit"
+                          disabled={importing || !selectedClientId || !importFile}
+                          className="w-full sm:w-auto px-8 h-12 bg-primary hover:bg-primary-hover disabled:bg-disabledCustom disabled:cursor-not-allowed text-white font-bold text-sm rounded-btn transition-all duration-200 hover:scale-[1.02] active:scale-95 shadow-md shadow-primary/20 flex items-center justify-center space-x-2"
+                        >
+                          {importing ? (
+                            <>
+                              <Loader2 className="h-5 w-5 animate-spin" />
+                              <span>Importando Arquivo...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>Importar Arquivo</span>
+                              <Check className="h-4.5 w-4.5" />
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </form>
+                    </div>
+
+                    {/* Grid de Histórico de Arquivos */}
+                    <div className="lg:col-span-7 bg-surface rounded-card border border-borderCustom p-6 md:p-8 shadow-cardShadow flex flex-col">
+                    <div className="mb-6">
+                      <h3 className="text-lg font-bold tracking-tight text-textPrimary">
+                        Histórico de Arquivos Importados
+                      </h3>
+                      <p className="text-xs text-textSecondary mt-0.5">
+                        Visualize e gerencie os documentos que já foram importados do cliente selecionado
+                      </p>
+                    </div>
+
+                    {!selectedClientId ? (
+                      <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
+                        <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
+                          <File className="h-6 w-6" />
+                        </div>
+                        <p className="text-xs font-semibold">Nenhum cliente selecionado</p>
+                        <p className="text-[10px] mt-1 text-textSecondary/60">Selecione um cliente no formulário acima para listar seus arquivos.</p>
+                      </div>
+                    ) : loadingImportedFiles ? (
+                      <div className="flex flex-col items-center justify-center py-12 text-textSecondary">
+                        <Loader2 className="h-6 w-6 animate-spin text-primary mb-3" />
+                        <p className="text-xs font-medium">Carregando histórico de arquivos...</p>
+                      </div>
+                    ) : importedFiles.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30">
+                        <div className="h-12 w-12 rounded-full bg-background border border-borderCustom/60 flex items-center justify-center text-textSecondary/50 mb-3 shadow-sm">
+                          <File className="h-6 w-6" />
+                        </div>
+                        <p className="text-xs font-semibold">Nenhum arquivo importado para este cliente</p>
+                        <p className="text-[10px] mt-1 text-textSecondary/60">Os novos arquivos importados aparecerão neste grid.</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-y-auto max-h-[400px]">
+                        {/* Cabeçalho da Tabela */}
+                        <div className="grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 bg-[#F4F6FA] border-b border-borderCustom px-4 py-3 text-[10px] font-bold text-textSecondary uppercase tracking-wider">
+                          <div>Nome do Arquivo</div>
+                          <div>Tipo</div>
+                          <div>Tamanho</div>
+                          <div>Importação</div>
+                          <div>Envios</div>
+                          <div className="text-right">Ações</div>
+                        </div>
+                        
+                        {/* Lista de Arquivos */}
+                        <div className="divide-y divide-borderCustom/40">
+                          {importedFiles.map((file, index) => (
+                            <div
+                              key={file.id}
+                              className={`grid grid-cols-[2fr_0.8fr_0.8fr_1.2fr_2fr_1.2fr] gap-2 px-4 py-3.5 items-center hover:bg-[#DCE3EE] transition-colors duration-150 ${
+                                index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                              }`}
+                            >
+                              {/* Nome */}
+                              <div className="text-xs font-bold text-textPrimary truncate" title={file.nome_arquivo}>
+                                {file.nome_arquivo}
+                              </div>
+
+                              {/* Tipo */}
+                              <div className="text-xs">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-badge text-[10px] font-bold ${
+                                  file.tipo_arquivo === 'xml'
+                                    ? 'bg-blue-500/10 text-blue-600'
+                                    : 'bg-red-500/10 text-red-600'
+                                }`}>
+                                  {file.tipo_arquivo.toUpperCase()}
+                                </span>
+                              </div>
+
+                              {/* Tamanho */}
+                              <div className="text-xs text-textSecondary font-semibold">
+                                {formatFileSize(file.tamanho_arquivo)}
+                              </div>
+
+                              {/* Data */}
+                              <div className="text-xs text-textSecondary font-medium">
+                                {formatImportDate(file.created_at)}
+                              </div>
+
+                              {/* Envios */}
+                              <div className="text-xs flex flex-col space-y-1">
+                                <div className="flex items-center space-x-1">
+                                  <span className="text-[10px] text-textSecondary font-semibold">E-mail:</span>
+                                  <span className={file.enviado_email_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
+                                    {file.enviado_email_at ? formatImportDate(file.enviado_email_at) : 'Não enviado'}
+                                  </span>
+                                </div>
+                                <div className="flex items-center space-x-1">
+                                  <span className="text-[10px] text-textSecondary font-semibold">Whats:</span>
+                                  <span className={file.enviado_whatsapp_at ? "text-green-600 font-medium" : "text-textSecondary/50 font-normal"}>
+                                    {file.enviado_whatsapp_at ? formatImportDate(file.enviado_whatsapp_at) : 'Não enviado'}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Ações */}
+                              <div className="flex items-center justify-end space-x-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadFile(file.caminho_storage, file.nome_arquivo)}
+                                  className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
+                                  title="Baixar Arquivo"
+                                >
+                                  <Download className="h-4 w-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
+                                  onClick={() => handleSendEmail(file)}
+                                  className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title="Enviar por E-mail"
+                                >
+                                  {sendingEmailId === file.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                                  ) : (
+                                    <Mail className="h-4 w-4" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={sendingEmailId === file.id || sendingWhatsappId === file.id}
+                                  onClick={() => handleSendWhatsapp(file)}
+                                  className="p-2 bg-surface hover:bg-background border border-borderCustom rounded-full text-textSecondary hover:text-primary transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                  title="Enviar por WhatsApp"
+                                >
+                                  {sendingWhatsappId === file.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                                  ) : (
+                                    <MessageSquare className="h-4 w-4" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteImportedFile(file.id, file.caminho_storage)}
+                                  className="p-2 bg-surface hover:bg-red-50 border border-borderCustom hover:border-red-200 rounded-full text-textSecondary hover:text-red-500 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 shadow-sm"
+                                  title="Excluir Arquivo"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    </div>
+
+                  </div>
+                </>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -2304,12 +2925,14 @@ const App: React.FC = () => {
       {/* Modal de Confirmação de Saída (Logout) */}
       <AnimatePresence>
         {showLogoutModal && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+          >
             {/* Backdrop */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
+            <div
               onClick={() => setShowLogoutModal(false)}
               className="absolute inset-0 bg-[#1e2235]/60 backdrop-blur-sm"
             />
@@ -2358,7 +2981,7 @@ const App: React.FC = () => {
                 </button>
               </div>
             </motion.div>
-          </div>
+          </motion.div>
         )}
       </AnimatePresence>
 

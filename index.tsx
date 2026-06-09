@@ -2,9 +2,9 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 
-if (import.meta.env.DEV) {
-  import('react-grab');
-}
+// if (import.meta.env.DEV) {
+//   import('react-grab');
+// }
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

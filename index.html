@@ -3,6 +3,29 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      window.addEventListener('error', function(event) {
+        const errorDiv = document.createElement('div');
+        errorDiv.style.position = 'fixed';
+        errorDiv.style.top = '0';
+        errorDiv.style.left = '0';
+        errorDiv.style.width = '100vw';
+        errorDiv.style.height = '100vh';
+        errorDiv.style.backgroundColor = '#fee2e2';
+        errorDiv.style.color = '#991b1b';
+        errorDiv.style.padding = '30px';
+        errorDiv.style.zIndex = '999999';
+        errorDiv.style.fontFamily = 'monospace';
+        errorDiv.style.whiteSpace = 'pre-wrap';
+        errorDiv.style.overflow = 'auto';
+        errorDiv.innerHTML = '<h2 style="font-size: 24px; font-weight: bold; margin-bottom: 15px;">Erro de Execução (Vite/React)</h2>' +
+          '<p style="margin-bottom: 10px;"><strong>Mensagem:</strong> ' + event.message + '</p>' +
+          '<p style="margin-bottom: 10px;"><strong>Arquivo:</strong> ' + event.filename + ':' + event.lineno + ':' + event.colno + '</p>' +
+          '<p style="margin-bottom: 10px;"><strong>Stack Trace:</strong></p>' +
+          '<pre style="background: #fecaca; padding: 15px; border-radius: 8px; border: 1px solid #f87171;">' + (event.error ? event.error.stack : 'N/A') + '</pre>';
+        document.body.appendChild(errorDiv);
+      });
+    </script>
     <title>NASA AUTO - Plataforma de envios</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
