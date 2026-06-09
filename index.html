@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>React Starter</title>
+    <title>NASA AUTO - Plataforma de envios</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script>
@@ -14,71 +14,79 @@
               sans: ['Inter', 'sans-serif'],
             },
             colors: {
-              border: "hsl(var(--border))",
-              input: "hsl(var(--input))",
-              ring: "hsl(var(--ring))",
-              background: "hsl(var(--background))",
-              foreground: "hsl(var(--foreground))",
               primary: {
-                DEFAULT: "hsl(var(--primary))",
-                foreground: "hsl(var(--primary-foreground))",
+                DEFAULT: "#E05A2B",
+                hover: "#ca4e22",
               },
               secondary: {
-                DEFAULT: "hsl(var(--secondary))",
-                foreground: "hsl(var(--secondary-foreground))",
+                DEFAULT: "#7FA6D9",
+                hover: "#6c93c4",
               },
-              destructive: {
-                DEFAULT: "hsl(var(--destructive))",
-                foreground: "hsl(var(--destructive-foreground))",
-              },
-              muted: {
-                DEFAULT: "hsl(var(--muted))",
-                foreground: "hsl(var(--muted-foreground))",
-              },
-              accent: {
-                DEFAULT: "hsl(var(--accent))",
-                foreground: "hsl(var(--accent-foreground))",
-              },
-              popover: {
-                DEFAULT: "hsl(var(--popover))",
-                foreground: "hsl(var(--popover-foreground))",
-              },
+              background: "#F4F6FA",
+              surface: "#FFFFFF",
+              textPrimary: "#23273A",
+              textSecondary: "#6E7385",
+              borderCustom: "#E8ECF4",
+              disabledCustom: "#D6DAE3",
+              
+              // Maintain compatibility with built-in Tailwind colors where needed
+              border: "#E8ECF4",
+              input: "#E8ECF4",
+              ring: "#E05A2B",
               card: {
-                DEFAULT: "hsl(var(--card))",
-                foreground: "hsl(var(--card-foreground))",
-              },
+                DEFAULT: "#FFFFFF",
+                foreground: "#23273A",
+              }
             },
             borderRadius: {
-              lg: "var(--radius)",
-              md: "calc(var(--radius) - 2px)",
-              sm: "calc(var(--radius) - 4px)",
+              card: "28px",
+              btn: "16px",
+              input: "24px",
+              badge: "999px",
             },
+            boxShadow: {
+              cardShadow: "0 8px 30px rgba(35, 39, 58, 0.04)",
+              hoverShadow: "0 12px 40px rgba(35, 39, 58, 0.08)",
+              dropdownShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)",
+            },
+            transitionProperty: {
+              'card': 'transform, box-shadow, background-color, border-color',
+            }
           },
         },
       }
     </script>
     <style>
       :root {
-        --background: 0 0% 100%;
-        --foreground: 222.2 84% 4.9%;
-        --card: 0 0% 100%;
-        --card-foreground: 222.2 84% 4.9%;
-        --popover: 0 0% 100%;
-        --popover-foreground: 222.2 84% 4.9%;
-        --primary: 222.2 47.4% 11.2%;
-        --primary-foreground: 210 40% 98%;
-        --secondary: 210 40% 96.1%;
-        --secondary-foreground: 222.2 47.4% 11.2%;
-        --muted: 210 40% 96.1%;
-        --muted-foreground: 215.4 16.3% 46.9%;
-        --accent: 210 40% 96.1%;
-        --accent-foreground: 222.2 47.4% 11.2%;
-        --destructive: 0 84.2% 60.2%;
-        --destructive-foreground: 210 40% 98%;
-        --border: 214.3 31.8% 91.4%;
-        --input: 214.3 31.8% 91.4%;
-        --ring: 222.2 84% 4.9%;
-        --radius: 0.5rem;
+        --background: #F4F6FA;
+        --foreground: #23273A;
+        --card: #FFFFFF;
+        --card-foreground: #23273A;
+        --primary: #E05A2B;
+        --primary-foreground: #FFFFFF;
+        --secondary: #7FA6D9;
+        --secondary-foreground: #23273A;
+        --border: #E8ECF4;
+        --radius: 28px;
+      }
+      body {
+        background-color: #F4F6FA;
+        color: #23273A;
+      }
+      /* Custom scrollbar for premium feel */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #F4F6FA;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #D6DAE3;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #6E7385;
       }
     </style>
   <script type="importmap">
