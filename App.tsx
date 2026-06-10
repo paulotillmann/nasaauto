@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from './src/lib/supabaseClient';
 import { AuthScreen } from './src/components/AuthScreen';
 import { sendDocumentEmail } from './src/lib/emailService';
+import { sendDocumentWhatsapp } from './src/lib/whatsappService';
 import {
   Search,
   Settings,
@@ -61,7 +62,7 @@ interface Professional {
   id: string;
   name: string;
   specialty: string;
-  level: 'Sênior' | 'Pleno' | 'Júnior';
+  level: string;
   avatar: string;
 }
 
@@ -130,6 +131,61 @@ const App: React.FC = () => {
   const [profileSuccess, setProfileSuccess] = useState(false);
   const [resolvedAvatarUrl, setResolvedAvatarUrl] = useState('');
 
+  // --- Estado para histórico de acessos dos usuários ---
+  const [accessLogs, setAccessLogs] = useState<Professional[]>(() => {
+    try {
+      const stored = localStorage.getItem('nasa_access_logs');
+      return stored ? JSON.parse(stored) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    if (session?.user) {
+      const userEmail = session.user.email;
+      const userName = session.user.user_metadata?.full_name || 'Usuário NASA';
+      const userRole = session.user.user_metadata?.role || 'Admin';
+      const userAvatar = resolvedAvatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80';
+      const accessTime = new Date().toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }).replace(', ', ' às ');
+
+      let logs: any[] = [];
+      try {
+        const stored = localStorage.getItem('nasa_access_logs');
+        if (stored) {
+          logs = JSON.parse(stored);
+        }
+      } catch (e) {
+        console.error('Error parsing access logs:', e);
+      }
+
+      // Filtrar duplicados do usuário atual
+      logs = logs.filter(log => log.email !== userEmail);
+
+      // Inserir o usuário atual no topo
+      logs.unshift({
+        id: session.user.id,
+        email: userEmail,
+        name: userName,
+        specialty: accessTime,
+        level: userRole === 'colaborador' ? 'Colaborador' : 'Admin',
+        avatar: userAvatar
+      });
+
+      // Manter apenas os últimos 3 acessos
+      logs = logs.slice(0, 3);
+
+      localStorage.setItem('nasa_access_logs', JSON.stringify(logs));
+      setAccessLogs(logs);
+    }
+  }, [session, resolvedAvatarUrl]);
+
   useEffect(() => {
     // Check initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -187,10 +243,10 @@ const App: React.FC = () => {
   // --- Roteamento Interno ---
   const [currentScreen, setCurrentScreen] = useState<'dashboard' | 'lista-clientes' | 'cadastro-clientes' | 'importar-nf-xml'>('dashboard');
 
-  // --- Estados do Gráfico de Envios de E-mails ---
+  // --- Estados do Calendário de Envios ---
   const [selectedMonth, setSelectedMonth] = useState<number>(5); // Junho (0-indexed, ou seja, 5)
   const [selectedYear, setSelectedYear] = useState<number>(2026); // Ano atual
-  const [chartData, setChartData] = useState<{ label: string; value: number; labelFull: string }[]>(getInitialDaysData(5, 2026));
+  const [calendarData, setCalendarData] = useState<Record<number, { xml: number; pdf: number }>>({});
   const [loadingChart, setLoadingChart] = useState<boolean>(false);
   const [monthlyXmlCount, setMonthlyXmlCount] = useState<number>(0);
   const [monthlyPdfCount, setMonthlyPdfCount] = useState<number>(0);
@@ -199,41 +255,51 @@ const App: React.FC = () => {
   const fetchChartData = async (month: number, year: number) => {
     setLoadingChart(true);
     try {
-      const list = getInitialDaysData(month, year);
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const initialData: Record<number, { xml: number; pdf: number }> = {};
+      for (let i = 1; i <= daysInMonth; i++) {
+        initialData[i] = { xml: 0, pdf: 0 };
+      }
+
       const startDate = new Date(year, month, 1, 0, 0, 0, 0).toISOString();
       const endDate = new Date(year, month + 1, 1, 0, 0, 0, 0).toISOString();
 
       const { data, error } = await supabase
         .from('arquivos_importados')
-        .select('enviado_email_at, tipo_arquivo')
-        .not('enviado_email_at', 'is', null)
-        .gte('enviado_email_at', startDate)
-        .lt('enviado_email_at', endDate);
+        .select('tipo_arquivo, created_at')
+        .gte('created_at', startDate)
+        .lt('created_at', endDate);
 
       if (error) {
-        console.error('Erro ao buscar dados do gráfico:', error);
+        console.error('Erro ao buscar dados do calendário:', error);
       } else if (data) {
+        let xmls = 0;
+        let pdfs = 0;
+
         data.forEach((item) => {
-          if (item.enviado_email_at) {
-            const date = new Date(item.enviado_email_at);
+          if (item.created_at) {
+            const date = new Date(item.created_at);
             const day = date.getDate();
-            if (day >= 1 && day <= list.length) {
-              list[day - 1].value += 1;
+            const type = item.tipo_arquivo?.toLowerCase();
+            if (day >= 1 && day <= daysInMonth) {
+              if (type === 'xml') {
+                initialData[day].xml += 1;
+                xmls += 1;
+              } else if (type === 'pdf') {
+                initialData[day].pdf += 1;
+                pdfs += 1;
+              }
             }
           }
         });
-
-        // Calcular quantidades mensais de XML e PDF enviados
-        const xmls = data.filter(item => item.tipo_arquivo?.toLowerCase() === 'xml').length;
-        const pdfs = data.filter(item => item.tipo_arquivo?.toLowerCase() === 'pdf').length;
 
         setMonthlyXmlCount(xmls);
         setMonthlyPdfCount(pdfs);
         setMonthlyTotalCount(xmls + pdfs);
       }
-      setChartData(list);
+      setCalendarData(initialData);
     } catch (err) {
-      console.error('Erro de conexão ao buscar dados do gráfico:', err);
+      console.error('Erro de conexão ao buscar dados do calendário:', err);
     } finally {
       setLoadingChart(false);
     }
@@ -253,11 +319,9 @@ const App: React.FC = () => {
   const [clientErrors, setClientErrors] = useState<Record<string, string>>({});
   const [clientSuccess, setClientSuccess] = useState(false);
   const [clientSaving, setClientSaving] = useState(false);
-  const [lastClients, setLastClients] = useState<any[]>([]);
-  const [loadingClients, setLoadingClients] = useState(true);
-  const [showAllClients, setShowAllClients] = useState(false);
   const [editingClient, setEditingClient] = useState<any | null>(null);
-  const [totalClients, setTotalClients] = useState(0);
+  const [recentSends, setRecentSends] = useState<any[]>([]);
+  const [loadingRecentSends, setLoadingRecentSends] = useState<boolean>(true);
 
   // --- Estados da Lista de Clientes com Paginação ---
   const [searchListQuery, setSearchListQuery] = useState('');
@@ -387,23 +451,16 @@ const App: React.FC = () => {
     },
   ];
 
-  // Profissionais Recomendados (Vamos nos Conectar)
-  const professionals: Professional[] = [
+  // Últimos acessos dos usuários no sistema (apenas os do sistema)
+  const professionals: Professional[] = accessLogs.length > 0 ? accessLogs : (session?.user ? [
     {
-      id: 'prof-1',
-      name: 'Randy Gouse',
-      specialty: 'Especialista em Cibersegurança',
-      level: 'Sênior',
-      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=120&q=80',
-    },
-    {
-      id: 'prof-2',
-      name: 'Giana Schleifer',
-      specialty: 'Designer UX/UI',
-      level: 'Pleno',
-      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=120&q=80',
-    },
-  ];
+      id: session.user.id,
+      name: session.user.user_metadata?.full_name || 'Usuário NASA',
+      specialty: new Date().toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).replace(', ', ' às '),
+      level: session.user.user_metadata?.role === 'colaborador' ? 'Colaborador' : 'Admin',
+      avatar: resolvedAvatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80',
+    }
+  ] : []);
 
   // Toggle do Accordion dos Projetos
   const toggleProject = (id: string) => {
@@ -421,10 +478,19 @@ const App: React.FC = () => {
     }));
   };
 
-  // Obter o valor atual com base no período selecionado
-  const safeActiveBarIndex = Math.min(activeChartBar, chartData.length - 1);
-  const activeValue = chartData[safeActiveBarIndex]?.value || 0;
-  const activeLabel = chartData[safeActiveBarIndex]?.labelFull || '';
+  // Calendário: Obter dias e dia de início da semana
+  const getCalendarDays = () => {
+    const daysInMonth = new Date(selectedYear, selectedMonth + 1, 0).getDate();
+    const firstDayOfWeek = new Date(selectedYear, selectedMonth, 1).getDay(); // 0 = Domingo, 1 = Segunda, etc.
+    
+    // Gerar dias vazios para preenchimento no início do calendário
+    const blankDays = Array(firstDayOfWeek).fill(null);
+    
+    // Gerar os dias do mês
+    const monthDays = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+    
+    return [...blankDays, ...monthDays];
+  };
 
   // Renderizar ícones do projeto correspondente
   const renderProjectIcon = (type: 'web' | 'copy' | 'design') => {
@@ -481,51 +547,92 @@ const App: React.FC = () => {
   };
 
   // Cálculo das posições do gráfico
-  const maxVal = Math.max(1, ...chartData.map((d) => d.value));
+  const maxVal = 1;
 
-  const fetchLastClients = async (showAll = showAllClients, search = searchQuery) => {
-    setLoadingClients(true);
+  const fetchRecentSends = async (search = searchQuery) => {
+    setLoadingRecentSends(true);
     try {
+      const selectQuery = search.trim() 
+        ? 'id, tipo_arquivo, enviado_email_at, enviado_whatsapp_at, created_at, clientes!inner(nome, email)' 
+        : 'id, tipo_arquivo, enviado_email_at, enviado_whatsapp_at, created_at, clientes(nome, email)';
+      
       let query = supabase
-        .from('clientes')
-        .select('id, nome, whatsapp, email, created_at, endereco', { count: 'exact' })
+        .from('arquivos_importados')
+        .select(selectQuery)
+        .or('enviado_email_at.not.is.null,enviado_whatsapp_at.not.is.null')
         .order('created_at', { ascending: false });
 
       if (search.trim()) {
-        query = query.ilike('nome', `%${search.trim()}%`);
+        query = query.ilike('clientes.nome', `%${search.trim()}%`);
       }
 
-      if (!showAll) {
-        query = query.limit(5);
-      }
+      // Aumentado para 200 para garantir que todos os envios válidos sejam carregados
+      query = query.limit(200);
 
-      const { data, count, error } = await query;
+      const { data, error } = await query;
 
       if (error) {
-        console.error('Erro ao buscar clientes:', error);
-      } else {
-        setLastClients(data || []);
-        if (count !== null) {
-          setTotalClients(count);
-        }
+        console.error('Erro ao buscar envios recentes:', error);
+      } else if (data) {
+        const sendEvents: any[] = [];
+        const now = new Date();
+        // Buffer de 1.5 dias para acomodar timezone/seeds do mesmo dia/amanhã
+        const limitDate = new Date(now.getTime() + 24 * 60 * 60 * 1000 * 1.5);
+
+        data.forEach((item: any) => {
+          // Filtra apenas os clientes do usuário logado se houver email na sessão
+          const clientEmail = item.clientes?.email;
+          const userEmail = session?.user?.email;
+          if (userEmail && clientEmail && clientEmail !== userEmail) {
+            return;
+          }
+
+          const emailDate = item.enviado_email_at ? new Date(item.enviado_email_at) : null;
+          const whatsappDate = item.enviado_whatsapp_at ? new Date(item.enviado_whatsapp_at) : null;
+          
+          const hasEmail = emailDate && emailDate <= limitDate;
+          const hasWhats = whatsappDate && whatsappDate <= limitDate;
+
+          if (hasEmail || hasWhats) {
+            const sendTime = Math.max(
+              hasEmail ? emailDate.getTime() : 0,
+              hasWhats ? whatsappDate.getTime() : 0
+            );
+
+            sendEvents.push({
+              id: item.id,
+              nome: item.clientes?.nome || 'Cliente',
+              horario: new Date(sendTime),
+              enviado_email_at: hasEmail ? emailDate : null,
+              enviado_whatsapp_at: hasWhats ? whatsappDate : null,
+              tipo: item.tipo_arquivo
+            });
+          }
+        });
+
+        // Ordena pela maior data de envio real decrescente
+        sendEvents.sort((a, b) => b.horario.getTime() - a.horario.getTime());
+
+        // Mantém apenas os top 6
+        setRecentSends(sendEvents.slice(0, 6));
       }
     } catch (err) {
-      console.error('Erro ao buscar clientes:', err);
+      console.error('Erro de conexão ao buscar envios recentes:', err);
     } finally {
-      setLoadingClients(false);
+      setLoadingRecentSends(false);
     }
   };
 
   useEffect(() => {
     if (!session) return;
     const handler = setTimeout(() => {
-      fetchLastClients(showAllClients, searchQuery);
+      fetchRecentSends(searchQuery);
     }, 300);
 
     return () => {
       clearTimeout(handler);
     };
-  }, [showAllClients, searchQuery, session]);
+  }, [searchQuery, session]);
 
   const formatWhatsapp = (val: string) => {
     if (!val) return '';
@@ -615,7 +722,7 @@ const App: React.FC = () => {
           setClientErrors({ dbError: error.message });
         } else {
           setClientSuccess(true);
-          fetchLastClients();
+          fetchRecentSends();
           setEditingClient(null);
           setClientNome('');
           setClientEndereco('');
@@ -642,7 +749,7 @@ const App: React.FC = () => {
           setClientErrors({ dbError: error.message });
         } else {
           setClientSuccess(true);
-          fetchLastClients();
+          fetchRecentSends();
           fetchListClients(currentPage, searchListQuery);
           // Limpa os campos
           setClientNome('');
@@ -1001,6 +1108,7 @@ const App: React.FC = () => {
         await fetchImportedFiles(selectedClientId);
       }
       fetchChartData(selectedMonth, selectedYear);
+      fetchRecentSends();
 
       setTimeout(() => {
         setImportSuccess(false);
@@ -1015,6 +1123,7 @@ const App: React.FC = () => {
 
   const handleSendWhatsapp = async (file: ImportedFile) => {
     const clientWhatsapp = file.clientes?.whatsapp;
+    const clientName = file.clientes?.nome;
 
     if (!clientWhatsapp) {
       setImportError('Este cliente não possui WhatsApp cadastrado.');
@@ -1026,6 +1135,29 @@ const App: React.FC = () => {
     setImportSuccess(false);
 
     try {
+      // 1. Obter URL do arquivo (signed link válido por 24 horas)
+      const { data: urlData, error: urlError } = await supabase.storage
+        .from('arquivos_nfs_xml')
+        .createSignedUrl(file.caminho_storage, 60 * 60 * 24);
+
+      if (urlError || !urlData?.signedUrl) {
+        throw new Error(`Erro ao obter link do arquivo: ${urlError?.message || 'URL inválida'}`);
+      }
+
+      // 2. Chamar o serviço de WhatsApp
+      const result = await sendDocumentWhatsapp({
+        to: clientWhatsapp,
+        nomeColaborador: clientName || 'Cliente NASA',
+        mediaUrl: urlData.signedUrl,
+        fileName: file.nome_arquivo,
+        tipoArquivo: file.tipo_arquivo
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Falha ao enviar mensagem por WhatsApp.');
+      }
+
+      // 3. Registrar no banco de dados a data/hora do envio
       const now = new Date().toISOString();
       const { data: updatedRows, error: dbError } = await supabase
         .from('arquivos_importados')
@@ -1034,30 +1166,28 @@ const App: React.FC = () => {
         .select();
 
       if (dbError) {
-        throw new Error(dbError.message);
+        console.error('Erro ao registrar data/hora de envio por WhatsApp:', dbError);
+        throw new Error(`Erro ao salvar no banco: ${dbError.message}`);
       }
 
       if (!updatedRows || updatedRows.length === 0) {
-        throw new Error('O banco de dados não permitiu atualizar o status (Erro de política RLS para UPDATE na tabela arquivos_importados).');
+        throw new Error('O envio foi realizado, mas o banco de dados não permitiu atualizar o status (Erro de política RLS para UPDATE na tabela arquivos_importados).');
       }
 
-      // Abre link de envio do whatsapp
-      const messageText = `Olá! Segue o seu arquivo importado: ${file.nome_arquivo}`;
-      const encodedText = encodeURIComponent(messageText);
-      window.open(`https://wa.me/55${clientWhatsapp.replace(/\D/g, '')}?text=${encodedText}`, '_blank');
-
-      setImportSuccessMessage('Link do WhatsApp aberto com sucesso!');
+      setImportSuccessMessage('Documento enviado via WhatsApp com sucesso!');
       setImportSuccess(true);
       if (selectedClientId) {
         await fetchImportedFiles(selectedClientId);
       }
+      fetchChartData(selectedMonth, selectedYear);
+      fetchRecentSends();
 
       setTimeout(() => {
         setImportSuccess(false);
       }, 4000);
     } catch (err: any) {
-      console.error('Erro ao simular envio de WhatsApp:', err);
-      setImportError(`Erro ao registrar envio por WhatsApp: ${err.message}`);
+      console.error('Erro ao enviar WhatsApp:', err);
+      setImportError(err.message || 'Ocorreu um erro ao enviar por WhatsApp.');
     } finally {
       setSendingWhatsappId(null);
     }
@@ -1503,341 +1633,295 @@ const App: React.FC = () => {
               {/* -------------------------------------------------------- */}
               <section className="lg:col-span-7 flex flex-col space-y-8">
 
-                {/* CARD PRINCIPAL: INCOME TRACKER                          */}
-                <div className="bg-surface rounded-card border border-borderCustom p-6 md:p-8 hover:shadow-cardShadow transition-shadow duration-300 relative overflow-hidden group">
+                {/* GRID DE COLUNAS: CALENDÁRIO E CARDS EMPILHADOS */}
+                <div className="flex flex-col xl:flex-row gap-6 items-stretch w-full">
 
-                  {/* Linha de Cima: Título, Ícone e Filtro de Período */}
-                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
-                    <div className="flex items-start space-x-4">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-[18px] bg-background text-textSecondary border border-borderCustom">
-                        <TrendingUp className="h-6 w-6" />
+                  {/* CARD PRINCIPAL: INCOME TRACKER (Calendário) */}
+                  <div className="bg-surface rounded-card border border-borderCustom p-6 md:p-8 hover:shadow-cardShadow transition-shadow duration-300 relative overflow-hidden group flex-1 min-w-0">
+
+                    {/* Linha de Cima: Título, Ícone e Filtro de Período */}
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+                      <div className="flex items-start space-x-4">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-[18px] bg-background text-textSecondary border border-borderCustom">
+                          <Calendar className="h-6 w-6" />
+                        </div>
+                        <div>
+                          <h2 className="text-2xl font-bold tracking-tight text-textPrimary">Importações do mês</h2>
+                          <p className="text-sm text-textSecondary mt-1 max-w-md">
+                            Acompanhe a quantidade de documentos importados por dia para seus clientes
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h2 className="text-2xl font-bold tracking-tight text-textPrimary">Envios de E-mails por Dia</h2>
-                        <p className="text-sm text-textSecondary mt-1 max-w-md">
-                          Acompanhe a quantidade de documentos enviados por e-mail para seus clientes no mês selecionado
-                        </p>
+
+                      {/* Seletor de Mês (Estilo do Anexo: September' 2021 < • >) */}
+                      <div className="flex flex-col items-center sm:items-end gap-1.5 self-end sm:self-center">
+                        <span className="text-md md:text-lg font-bold tracking-tight text-textPrimary select-none whitespace-nowrap">
+                          {monthsList[selectedMonth]}' {selectedYear}
+                        </span>
+                        <div className="flex items-center space-x-1.5 bg-background border border-borderCustom rounded-btn p-1.5 shadow-sm">
+                          <button
+                            onClick={() => {
+                              if (selectedMonth === 0) {
+                                setSelectedMonth(11);
+                                setSelectedYear(selectedYear - 1);
+                              } else {
+                                setSelectedMonth(selectedMonth - 1);
+                              }
+                              setActiveChartBar(0);
+                            }}
+                            className="p-1.5 hover:bg-surface rounded-full text-textSecondary hover:text-textPrimary transition-all duration-150 focus:outline-none hover:-translate-y-0.5 active:translate-y-0 active:scale-95"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={() => {
+                              const now = new Date();
+                              setSelectedMonth(now.getMonth());
+                              setSelectedYear(now.getFullYear());
+                              setActiveChartBar(now.getDate() - 1);
+                            }}
+                            className="p-2 hover:bg-surface rounded-full text-textSecondary hover:text-primary transition-all duration-150 focus:outline-none flex items-center justify-center hover:scale-110"
+                          >
+                            <span className="h-2 w-2 rounded-full bg-primary" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (selectedMonth === 11) {
+                                setSelectedMonth(0);
+                                setSelectedYear(selectedYear + 1);
+                              } else {
+                                setSelectedMonth(selectedMonth + 1);
+                              }
+                              setActiveChartBar(0);
+                            }}
+                            className="p-1.5 hover:bg-surface rounded-full text-textSecondary hover:text-textPrimary transition-all duration-150 focus:outline-none hover:-translate-y-0.5 active:translate-y-0 active:scale-95"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
                     </div>
 
-                    {/* Seletor de Mês (Estilo do Anexo: September' 2021 < • >) */}
-                    <div className="flex items-center space-x-4 self-end sm:self-center">
-                      <span className="text-md md:text-lg font-bold tracking-tight text-textPrimary select-none">
-                        {monthsList[selectedMonth]}' {selectedYear}
-                      </span>
-                      <div className="flex items-center space-x-1.5 bg-background border border-borderCustom rounded-btn p-1.5 shadow-sm">
-                        <button
-                          onClick={() => {
-                            if (selectedMonth === 0) {
-                              setSelectedMonth(11);
-                              setSelectedYear(selectedYear - 1);
-                            } else {
-                              setSelectedMonth(selectedMonth - 1);
-                            }
-                            setActiveChartBar(0);
-                          }}
-                          className="p-1.5 hover:bg-surface rounded-full text-textSecondary hover:text-textPrimary transition-all duration-150 focus:outline-none hover:-translate-y-0.5 active:translate-y-0 active:scale-95"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-                          </svg>
-                        </button>
-                        <button
-                          onClick={() => {
-                            const now = new Date();
-                            setSelectedMonth(now.getMonth());
-                            setSelectedYear(now.getFullYear());
-                            setActiveChartBar(now.getDate() - 1);
-                          }}
-                          className="p-2 hover:bg-surface rounded-full text-textSecondary hover:text-primary transition-all duration-150 focus:outline-none flex items-center justify-center hover:scale-110"
-                        >
-                          <span className="h-2 w-2 rounded-full bg-primary" />
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (selectedMonth === 11) {
-                              setSelectedMonth(0);
-                              setSelectedYear(selectedYear + 1);
-                            } else {
-                              setSelectedMonth(selectedMonth + 1);
-                            }
-                            setActiveChartBar(0);
-                          }}
-                          className="p-1.5 hover:bg-surface rounded-full text-textSecondary hover:text-textPrimary transition-all duration-150 focus:outline-none hover:-translate-y-0.5 active:translate-y-0 active:scale-95"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                          </svg>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Conteúdo do Card: Valor Principal + Gráfico */}
-                  <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-center mt-[4px]">
-
-                    {/* Gráfico SVG customizado estilo Linha com Pontos (Mockup) */}
-                    <div className="md:col-span-12 flex flex-col items-center justify-end relative h-[218px]">
-
-                      {/* Spinner de Carregamento Premium */}
+                    {/* Conteúdo do Card: Calendário de Envios */}
+                    <div className="w-full max-w-[720px] mx-auto mt-6 relative min-h-[280px]">
                       {loadingChart && (
                         <div className="absolute inset-0 bg-surface/50 backdrop-blur-[1px] flex items-center justify-center z-20">
-                          <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                          <Loader2 className="h-8 w-8 animate-spin text-primary" />
                         </div>
                       )}
 
-                      {/* Tooltip flutuante sobre a coluna ativa */}
-                      <AnimatePresence mode="wait">
-                        <motion.div
-                          key={`${selectedMonth}-${selectedYear}-${activeChartBar}`}
-                          initial={{ opacity: 0, y: -10, scale: 0.9 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={{ opacity: 0, y: -10, scale: 0.9 }}
-                          transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-                          className="absolute bg-textPrimary text-white text-xs font-bold px-4 py-2.5 rounded-[12px] shadow-lg flex flex-col items-center z-10"
-                          style={{
-                            top: `calc(${110 - (activeValue / maxVal) * 70}px - 35px)`,
-                            left: `calc(${(safeActiveBarIndex / (chartData.length - 1)) * 100}% - 24px)`,
-                            transform: 'translateX(-50%)',
-                          }}
-                        >
-                          <span className="text-[10px] text-textSecondary font-medium leading-none mb-1">
-                            {activeLabel}
-                          </span>
-                          <span className="text-sm font-semibold">
-                            {activeValue === 1 ? '1 envio' : `${activeValue} envios`}
-                          </span>
-                          {/* Seta do Tooltip */}
-                          <div className="w-2.5 h-2.5 bg-textPrimary rotate-45 absolute -bottom-1 left-1/2 -translate-x-1/2" />
-                        </motion.div>
-                      </AnimatePresence>
+                      {/* Cabeçalho dos Dias da Semana */}
+                      <div className="grid grid-cols-7 gap-2 md:gap-3 text-center mb-4 border-b border-borderCustom/60 pb-2">
+                        {['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'].map((dayName) => (
+                          <div key={dayName} className="text-xs font-extrabold text-textSecondary select-none uppercase tracking-wider">
+                            {dayName}
+                          </div>
+                        ))}
+                      </div>
 
-                      {/* Canvas de Barras / Linhas Verticais */}
-                      <div className="w-full h-[106px] flex justify-between items-end px-2 md:px-6 relative">
+                      {/* Grade dos Dias do Mês */}
+                      <div className="grid grid-cols-7 gap-2 md:gap-3">
+                        {getCalendarDays().map((day, index) => {
+                          if (day === null) {
+                            return (
+                              <div 
+                                key={`empty-${index}`} 
+                                className="aspect-[4/3.5] rounded-xl bg-[#F4F6FA]/25 border border-borderCustom/30 opacity-40"
+                              />
+                            );
+                          }
 
-                        {/* Linhas de Grade de Fundo */}
-                        <div className="absolute inset-x-0 bottom-0 top-6 border-b border-borderCustom/40 flex flex-col justify-between pointer-events-none">
-                          <div className="w-full border-t border-dashed border-borderCustom/30" />
-                          <div className="w-full border-t border-dashed border-borderCustom/30" />
-                          <div className="w-full border-t border-dashed border-borderCustom/30" />
-                        </div>
-
-                        {chartData.map((d, index) => {
-                          const isActive = index === safeActiveBarIndex;
-                          const pct = d.value / maxVal;
-                          const barHeight = pct * 70; // max 70px
+                          const counts = calendarData[day] || { xml: 0, pdf: 0 };
+                          const today = new Date();
+                          const isToday = 
+                            day === today.getDate() && 
+                            selectedMonth === today.getMonth() && 
+                            selectedYear === today.getFullYear();
 
                           return (
                             <div
-                              key={d.label}
-                              className="flex flex-col items-center flex-1 relative group/col cursor-pointer min-w-0"
-                              onMouseEnter={() => setActiveChartBar(index)}
+                              key={day}
+                              className={`aspect-[4/3.5] p-1 md:p-1.5 rounded-xl border flex flex-col justify-between transition-all duration-200 group/day select-none relative ${
+                                isToday 
+                                  ? 'border-blue-600 bg-blue-50/10 shadow-sm ring-1 ring-blue-600/35' 
+                                  : 'border-borderCustom bg-surface hover:shadow-cardShadow hover:bg-[#F4F6FA]/40 hover:border-borderCustom/80'
+                              }`}
                             >
-                              {/* Coluna de seleção invisível larga para facilitar hover */}
-                              <div className="absolute top-0 bottom-0 w-full hover:bg-black/0 cursor-pointer z-0" />
-
-                              {/* Destaque de coluna ativa (coluna branca leve de fundo) */}
-                              {isActive && (
-                                <motion.div
-                                  layoutId="activeColBg"
-                                  className="absolute -top-6 bottom-0 w-7 md:w-9 bg-[#F4F6FA] border border-borderCustom/30 rounded-[24px] z-0"
-                                  transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                                />
-                              )}
-
-                              {/* Render da Linha Vertical e do Ponto Azul */}
-                              <div className="flex flex-col items-center justify-end relative h-40 w-full z-10">
-
-                                {/* Ponto azul no topo da linha */}
-                                <motion.div
-                                  initial={{ scale: 0.8 }}
-                                  animate={{ scale: isActive ? 1.3 : 1 }}
-                                  className={`w-2 h-2 md:w-2.5 md:h-2.5 rounded-full border border-surface shadow-sm mb-[-4px] transition-colors duration-200 ${isActive
-                                    ? 'bg-primary border-surface scale-125'
-                                    : 'bg-[#7FA6D9] border-surface'
-                                    }`}
-                                  style={{ bottom: `${barHeight}px` }}
-                                />
-
-                                {/* A linha vertical fina cinza do gráfico */}
-                                <div
-                                  className={`w-[1px] md:w-[1.5px] transition-colors duration-200 ${isActive ? 'bg-primary/55' : 'bg-borderCustom/80'
-                                    }`}
-                                  style={{ height: `${barHeight}px` }}
-                                />
-
-                              </div>
-
-                              {/* Badge do Dia / Label no rodapé (Reduzido em mobile para não embolar) */}
-                              <div className="mt-3 z-10">
-                                <span
-                                  className={`h-5 w-5 md:h-6 md:w-6 rounded-full flex items-center justify-center text-[9px] md:text-xs font-semibold select-none transition-all duration-200 ${isActive
-                                    ? 'bg-textPrimary text-white shadow-sm'
-                                    : 'text-textSecondary group-hover/col:text-textPrimary'
-                                    } ${index % 3 !== 0 && !isActive ? 'hidden md:flex' : 'flex'
-                                    }`}
+                              {/* Número do Dia */}
+                              <div className="flex justify-start">
+                                <span 
+                                  className={`text-[11px] md:text-sm font-extrabold h-5 w-5 md:h-7 md:w-7 rounded-full flex items-center justify-center transition-all duration-150 ${
+                                    isToday 
+                                      ? 'bg-blue-600 text-white shadow-sm' 
+                                      : 'text-textPrimary group-hover/day:scale-105'
+                                  }`}
                                 >
-                                  {d.label}
+                                  {day}
                                 </span>
                               </div>
-                            </div>
-                          );
-                        })}
 
-                      </div>
-
-                    </div>
-
-                  </div>
-
-                </div>
-
-                {/* GRADE INFERIOR: LET'S CONNECT E PROPOSAL PROGRESS */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-
-                  {/* CARD 1: PROPOSAL PROGRESS                                */}
-                  <div className="bg-surface rounded-card border border-borderCustom p-6 hover:shadow-cardShadow transition-shadow duration-300 flex flex-col justify-between">
-                    <div>
-                      <div className="flex justify-between items-center mb-5">
-                        <h3 className="text-lg font-bold tracking-tight text-textPrimary">Arquivo enviados</h3>
-                      </div>
-
-                      {/* Números e Barras de Progresso Verticais Customizadas */}
-                      <div className="grid grid-cols-3 gap-3 border-b border-borderCustom/60 pb-4 mb-4">
-
-                        {/* Proposals */}
-                        <div className="flex flex-col">
-                          <span className="text-[10px] text-textSecondary leading-none">Arquivos XML</span>
-                          <span className="text-2xl font-extrabold text-blue-500 mt-1.5">{monthlyXmlCount}</span>
-                        </div>
-
-                        {/* Interviews */}
-                        <div className="flex flex-col border-l border-borderCustom/60 pl-3">
-                          <span className="text-[10px] text-textSecondary leading-none font-medium">Arquivos NFs</span>
-                          <span className="text-2xl font-extrabold text-primary mt-1.5">{monthlyPdfCount}</span>
-                        </div>
-
-                        {/* Hires */}
-                        <div className="flex flex-col border-l border-borderCustom/60 pl-3">
-                          <span className="text-[10px] text-textSecondary leading-none">Totais</span>
-                          <span className="text-2xl font-extrabold text-textPrimary mt-1.5">{monthlyTotalCount}</span>
-                        </div>
-
-                      </div>
-
-                      {/* Visualização de barras de tick estilizadas abaixo das métricas (estilo medidor analógico do mockup) */}
-                      <div className="grid grid-cols-3 gap-3 h-10 items-end px-1">
-
-                        {/* Ticks XML: Coloridos em Azul */}
-                        <div className="flex space-x-[2px] justify-start h-full items-end">
-                          {Array.from({ length: 14 }).map((_, i) => {
-                            const activeTicks = Math.min(14, monthlyXmlCount);
-                            return (
-                              <div
-                                key={i}
-                                className={`w-[1.5px] rounded-full transition-colors duration-200`}
-                                style={{
-                                  height: `${20 + (i % 3) * 6}%`,
-                                  backgroundColor: i < activeTicks ? '#3B82F6' : '#E8ECF4'
-                                }}
-                              />
-                            );
-                          })}
-                        </div>
-
-                        {/* Ticks PDFs: Coloridos Vermelho-Alaranjado */}
-                        <div className="flex space-x-[2px] justify-start h-full items-end pl-2.5">
-                          {Array.from({ length: 14 }).map((_, i) => {
-                            const activeTicks = Math.min(14, monthlyPdfCount);
-                            return (
-                              <div
-                                key={i}
-                                className={`w-[1.5px] rounded-full transition-colors duration-200`}
-                                style={{
-                                  height: `${20 + (i % 3) * 6}%`,
-                                  backgroundColor: i < activeTicks ? '#E05A2B' : '#E8ECF4'
-                                }}
-                              />
-                            );
-                          })}
-                        </div>
-
-                        {/* Ticks Totais: Coloridos Preto/Navy */}
-                        <div className="flex space-x-[2px] justify-start h-full items-end pl-2.5">
-                          {Array.from({ length: 14 }).map((_, i) => {
-                            const activeTicks = Math.min(14, monthlyTotalCount);
-                            return (
-                              <div
-                                key={i}
-                                className={`w-[1.5px] rounded-full transition-colors duration-200`}
-                                style={{
-                                  height: `${20 + (i % 3) * 6}%`,
-                                  backgroundColor: i < activeTicks ? '#23273A' : '#E8ECF4'
-                                }}
-                              />
-                            );
-                          })}
-                        </div>
-
-                      </div>
-
-                    </div>
-                  </div>
-
-                  {/* CARD 2: LET'S CONNECT                                   */}
-                  <div className="bg-surface rounded-card border border-borderCustom p-6 hover:shadow-cardShadow transition-shadow duration-300 flex flex-col justify-between">
-                    <div>
-                      <div className="flex justify-between items-center mb-5">
-                        <h3 className="text-lg font-bold tracking-tight text-textPrimary">Últimos acessos</h3>
-                        <a href="#see-all" className="text-xs font-semibold text-textSecondary hover:text-primary transition-colors">
-                          Ver todos
-                        </a>
-                      </div>
-
-                      {/* Lista de Profissionais Recomendados */}
-                      <div className="space-y-4">
-                        {professionals.map((prof) => {
-                          const isConnected = connectedUsers[prof.id];
-                          return (
-                            <div key={prof.id} className="flex items-center justify-between p-3 bg-background rounded-[20px] border border-borderCustom/40 hover:bg-[#F4F6FA]/80 transition-colors duration-200 group">
-
-                              {/* Info do Usuário */}
-                              <div className="flex items-center space-x-3">
-                                <div className="h-10 w-10 rounded-full overflow-hidden border border-borderCustom/60 shadow-sm relative">
-                                  <img
-                                    src={prof.avatar}
-                                    alt={prof.name}
-                                    className="h-full w-full object-cover"
-                                  />
-                                </div>
-                                <div className="flex flex-col">
-                                  <div className="flex items-center space-x-1.5">
-                                    <span className="text-xs font-bold text-textPrimary leading-tight">{prof.name}</span>
-                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-badge ${prof.level === 'Sênior'
-                                      ? 'bg-primary/10 text-primary'
-                                      : 'bg-[#7FA6D9]/10 text-secondary-hover'
-                                      }`}>
-                                      {prof.level}
-                                    </span>
+                              {/* Contadores XML/PDF */}
+                              <div className="flex flex-col space-y-0.5 md:space-y-1">
+                                {counts.xml > 0 && (
+                                  <div className="flex items-center justify-center text-[8px] md:text-[9.5px] font-bold text-blue-600 bg-blue-50 px-1 py-0.5 rounded-badge border border-blue-100 shadow-sm transition-all group-hover/day:scale-[1.02] whitespace-nowrap">
+                                    <span>{counts.xml} XML</span>
                                   </div>
-                                  <span className="text-[10px] text-textSecondary mt-0.5">{prof.specialty}</span>
-                                </div>
+                                )}
+                                {counts.pdf > 0 && (
+                                  <div className="flex items-center justify-center text-[8px] md:text-[9.5px] font-bold text-orange-600 bg-orange-50 px-1 py-0.5 rounded-badge border border-orange-100 shadow-sm transition-all group-hover/day:scale-[1.02] whitespace-nowrap">
+                                    <span>{counts.pdf} PDF</span>
+                                  </div>
+                                )}
                               </div>
-
-                              {/* Botão Adicionar / Conectado */}
-                              <button
-                                onClick={() => toggleConnect(prof.id)}
-                                className={`h-8 w-8 rounded-full flex items-center justify-center transition-all duration-200 ${isConnected
-                                  ? 'bg-green-500 text-white hover:bg-green-600'
-                                  : 'bg-surface border border-borderCustom text-textPrimary hover:bg-primary hover:text-white hover:border-transparent'
-                                  }`}
-                              >
-                                {isConnected ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-                              </button>
-
                             </div>
                           );
                         })}
+                      </div>
+                    </div>
+
+                  </div>
+
+                  {/* COLUNA DE CARDS EMPILHADOS: ARQUIVOS ENVIADOS E ÚLTIMOS ACESSOS */}
+                  <div className="flex flex-col gap-6 w-full xl:w-[340px] flex-shrink-0">
+
+                    {/* CARD 1: PROPOSAL PROGRESS (Arquivos enviados) */}
+                    <div className="bg-surface rounded-card border border-borderCustom p-6 hover:shadow-cardShadow transition-shadow duration-300 flex flex-col justify-between flex-1">
+                      <div>
+                        <div className="flex justify-between items-center mb-5">
+                          <h3 className="text-lg font-bold tracking-tight text-textPrimary">Arquivos importados</h3>
+                        </div>
+
+                        {/* Números e Barras de Progresso Verticais Customizadas */}
+                        <div className="grid grid-cols-3 gap-3 border-b border-borderCustom/60 pb-4 mb-4">
+
+                          {/* Proposals */}
+                          <div className="flex flex-col">
+                            <span className="text-[10px] text-textSecondary leading-none">Arquivos XML</span>
+                            <span className="text-2xl font-extrabold text-blue-500 mt-1.5">{monthlyXmlCount}</span>
+                          </div>
+
+                          {/* Interviews */}
+                          <div className="flex flex-col border-l border-borderCustom/60 pl-3">
+                            <span className="text-[10px] text-textSecondary leading-none font-medium">Arquivos NFs</span>
+                            <span className="text-2xl font-extrabold text-primary mt-1.5">{monthlyPdfCount}</span>
+                          </div>
+
+                          {/* Hires */}
+                          <div className="flex flex-col border-l border-borderCustom/60 pl-3">
+                            <span className="text-[10px] text-textSecondary leading-none">Totais</span>
+                            <span className="text-2xl font-extrabold text-textPrimary mt-1.5">{monthlyTotalCount}</span>
+                          </div>
+
+                        </div>
+
+                        {/* Visualização de barras de tick estilizadas abaixo das métricas (estilo medidor analógico do mockup) */}
+                        <div className="grid grid-cols-3 gap-3 h-10 items-end px-1">
+
+                          {/* Ticks XML: Coloridos em Azul */}
+                          <div className="flex space-x-[2px] justify-start h-full items-end">
+                            {Array.from({ length: 14 }).map((_, i) => {
+                              const activeTicks = Math.min(14, monthlyXmlCount);
+                              return (
+                                <div
+                                  key={i}
+                                  className={`w-[1.5px] rounded-full transition-colors duration-200`}
+                                  style={{
+                                    height: `${20 + (i % 3) * 6}%`,
+                                    backgroundColor: i < activeTicks ? '#3B82F6' : '#E8ECF4'
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+
+                          {/* Ticks PDFs: Coloridos Vermelho-Alaranjado */}
+                          <div className="flex space-x-[2px] justify-start h-full items-end pl-2.5">
+                            {Array.from({ length: 14 }).map((_, i) => {
+                              const activeTicks = Math.min(14, monthlyPdfCount);
+                              return (
+                                <div
+                                  key={i}
+                                  className={`w-[1.5px] rounded-full transition-colors duration-200`}
+                                  style={{
+                                    height: `${20 + (i % 3) * 6}%`,
+                                    backgroundColor: i < activeTicks ? '#E05A2B' : '#E8ECF4'
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+
+                          {/* Ticks Totais: Coloridos Preto/Navy */}
+                          <div className="flex space-x-[2px] justify-start h-full items-end pl-2.5">
+                            {Array.from({ length: 14 }).map((_, i) => {
+                              const activeTicks = Math.min(14, monthlyTotalCount);
+                              return (
+                                <div
+                                  key={i}
+                                  className={`w-[1.5px] rounded-full transition-colors duration-200`}
+                                  style={{
+                                    height: `${20 + (i % 3) * 6}%`,
+                                    backgroundColor: i < activeTicks ? '#23273A' : '#E8ECF4'
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+
+                        </div>
+
+                      </div>
+                    </div>
+
+                    {/* CARD 2: LET'S CONNECT (Últimos acessos) */}
+                    <div className="bg-surface rounded-card border border-borderCustom p-6 hover:shadow-cardShadow transition-shadow duration-300 flex flex-col justify-between flex-1">
+                      <div>
+                        <div className="flex justify-between items-center mb-5">
+                          <h3 className="text-lg font-bold tracking-tight text-textPrimary">Últimos acessos</h3>
+                        </div>
+
+                        {/* Lista de Últimos Acessos */}
+                        <div className="space-y-4">
+                          {professionals.map((prof) => {
+                            return (
+                              <div key={prof.id} className="flex items-center justify-between p-3 bg-background rounded-[20px] border border-borderCustom/40 hover:bg-[#F4F6FA]/80 transition-colors duration-200 group">
+
+                                {/* Info do Usuário */}
+                                <div className="flex items-center space-x-3">
+                                  <div className="h-10 w-10 rounded-full overflow-hidden border border-borderCustom/60 shadow-sm relative">
+                                    <img
+                                      src={prof.avatar}
+                                      alt={prof.name}
+                                      className="h-full w-full object-cover"
+                                    />
+                                  </div>
+                                  <div className="flex flex-col">
+                                    <div className="flex items-center space-x-1.5">
+                                      <span className="text-xs font-bold text-textPrimary leading-tight">{prof.name}</span>
+                                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-badge ${prof.level === 'Sênior' || prof.level === 'Admin'
+                                        ? 'bg-primary/10 text-primary'
+                                        : 'bg-[#7FA6D9]/10 text-secondary-hover'
+                                        }`}>
+                                        {prof.level}
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-textSecondary mt-0.5">{prof.specialty}</span>
+                                  </div>
+                                </div>
+
+                                {/* Indicador de Acesso */}
+                                <div className="h-8 w-8 rounded-full flex items-center justify-center bg-surface border border-borderCustom text-textSecondary group-hover:text-primary group-hover:border-primary/30 transition-colors duration-200">
+                                  <Clock className="h-4 w-4" />
+                                </div>
+
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1851,83 +1935,119 @@ const App: React.FC = () => {
               {/* -------------------------------------------------------- */}
               <section className="lg:col-span-3 flex flex-col space-y-8">
 
-                {/* CARD: YOUR RECENT PROJECTS                              */}
+                {/* CARD: ÚLTIMOS ENVIOS PARA CLIENTES */}
                 <div className="bg-surface rounded-card border border-borderCustom p-6 hover:shadow-cardShadow transition-shadow duration-300 flex flex-col h-[670px]">
 
                   <div className="flex-grow flex flex-col min-h-0">
                     {/* Título Card */}
                     <div className="flex justify-between items-center mb-6 flex-shrink-0">
                       <div className="flex items-center space-x-2">
-                        <h3 className="text-lg font-bold tracking-tight text-textPrimary">Últimos Clientes cadastrados</h3>
+                        <h3 className="text-lg font-bold tracking-tight text-textPrimary">Últimos Envios para Clientes</h3>
                         <span className="inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold rounded-full bg-primary/10 text-primary border border-primary/20">
-                          {totalClients}
+                          {recentSends.length}
                         </span>
                       </div>
                     </div>
 
-                    {loadingClients ? (
+                    {loadingRecentSends ? (
                       <div className="flex flex-col items-center justify-center py-12 text-textSecondary flex-grow">
                         <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mb-3"></div>
-                        <p className="text-xs font-medium">Carregando clientes...</p>
+                        <p className="text-xs font-medium">Carregando envios...</p>
                       </div>
-                    ) : lastClients.length === 0 ? (
+                    ) : recentSends.length === 0 ? (
                       <div className="flex flex-col items-center justify-center py-12 text-center text-textSecondary border border-dashed border-borderCustom/60 rounded-card bg-background/30 flex-grow">
-                        <p className="text-xs font-semibold">Nenhum cliente cadastrado</p>
-                        <p className="text-[10px] mt-1 text-textSecondary/60">Os novos clientes aparecerão aqui.</p>
+                        <p className="text-xs font-semibold">Nenhum envio recente</p>
+                        <p className="text-[10px] mt-1 text-textSecondary/60">Os envios de e-mail e WhatsApp aparecerão aqui.</p>
                       </div>
                     ) : (
                       <div className="overflow-hidden border border-borderCustom/60 rounded-card bg-background/30 overflow-y-auto flex-1 min-h-0 mt-4">
                         {/* Cabeçalho do Grid */}
-                        <div className="grid grid-cols-[2fr_1fr] gap-2 bg-[#F4F6FA] border-b border-borderCustom px-4 py-3 text-[10px] font-bold text-textSecondary uppercase tracking-wider">
-                          <div>Nome completo</div>
-                          <div>WhatsApp</div>
+                        <div className="grid grid-cols-[1.5fr_1fr_1fr] gap-2 bg-[#F4F6FA] border-b border-borderCustom px-4 py-3 text-[10px] font-bold text-textSecondary uppercase tracking-wider">
+                          <div>Cliente</div>
+                          <div className="text-center">Canal</div>
+                          <div className="text-center">Arquivo</div>
                         </div>
                         {/* Linhas */}
                         <div className="divide-y divide-borderCustom/40">
-                          {lastClients.map((client, index) => (
-                            <div
-                              key={client.id || index}
-                              onClick={() => handleEditClientClick(client)}
-                              className={`grid grid-cols-[2fr_1fr] gap-2 px-4 py-3.5 items-center hover:bg-[#DCE3EE] transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
+                          {recentSends.map((send, index) => {
+                            const formatDateStr = (date: Date) => {
+                              return date.toLocaleString('pt-BR', {
+                                day: '2-digit',
+                                month: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              }).replace(', ', ' às ');
+                            };
+
+                            return (
+                              <div
+                                key={send.id || index}
+                                className={`grid grid-cols-[1.5fr_1fr_1fr] gap-2 px-4 py-3 items-center hover:bg-[#DCE3EE] transition-colors duration-150 ${
+                                  index % 2 === 0 ? 'bg-surface' : 'bg-[#ECEFF6]'
                                 }`}
-                            >
-                              <div className="text-xs font-bold text-textPrimary truncate uppercase" title={client.nome?.toUpperCase()}>
-                                {client.nome}
+                              >
+                                {/* Cliente e Horário */}
+                                <div className="flex flex-col min-w-0">
+                                  <span className="text-xs font-bold text-textPrimary truncate uppercase" title={send.nome}>
+                                    {send.nome}
+                                  </span>
+                                  {send.enviado_email_at && (
+                                    <span className="text-[10px] text-textSecondary font-semibold mt-0.5 truncate">
+                                      E-mail: {formatDateStr(send.enviado_email_at)}
+                                    </span>
+                                  )}
+                                  {send.enviado_whatsapp_at && (
+                                    <span className="text-[10px] text-textSecondary font-semibold mt-0.5 truncate">
+                                      Whats: {formatDateStr(send.enviado_whatsapp_at)}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Canal */}
+                                <div className="flex flex-col items-center justify-center space-y-1">
+                                  {send.enviado_email_at && (
+                                    <span className="inline-flex items-center justify-center px-2 py-0.5 text-[9px] font-bold rounded-badge border bg-indigo-50 text-indigo-700 border-indigo-200">
+                                      Email
+                                    </span>
+                                  )}
+                                  {send.enviado_whatsapp_at && (
+                                    <span className="inline-flex items-center justify-center px-2 py-0.5 text-[9px] font-bold rounded-badge border bg-green-50 text-green-700 border-green-200">
+                                      WhatsApp
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Arquivo */}
+                                <div className="flex justify-center">
+                                  <span className={`inline-flex items-center justify-center px-2 py-0.5 text-[9px] font-bold rounded-badge border uppercase ${
+                                    send.tipo === 'xml' 
+                                      ? 'bg-blue-50 text-blue-700 border-blue-200' 
+                                      : 'bg-orange-50 text-orange-700 border-orange-200'
+                                  }`}>
+                                    {send.tipo}
+                                  </span>
+                                </div>
+
                               </div>
-                              <div className="text-xs text-textSecondary font-semibold truncate" title={client.whatsapp}>
-                                {formatWhatsapp(client.whatsapp)}
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
                   </div>
 
-                  {/* Botão de Rodapé decorativo/ação do card de projetos */}
-                  <div className="mt-2 pt-2 border-t border-borderCustom/60 flex flex-col items-center space-y-3">
-                    <button
-                      type="button"
-                      onClick={() => setShowAllClients(!showAllClients)}
-                      className="text-xs font-semibold text-textSecondary hover:text-primary underline transition-colors focus:outline-none"
-                    >
-                      {showAllClients ? 'Ver apenas os últimos 5' : 'Ver todos os Clientes'}
-                    </button>
+                  {/* Botão de Rodapé */}
+                  <div className="mt-2 pt-2 border-t border-borderCustom/60">
                     <button
                       onClick={() => {
-                        setEditingClient(null);
-                        setClientNome('');
-                        setClientEndereco('');
-                        setClientWhatsapp('');
-                        setClientEmail('');
-                        setClientErrors({});
-                        setCurrentScreen('cadastro-clientes');
-                        setActiveNavItem('Cadastros');
+                        setCurrentScreen('importar-nf-xml');
+                        setImportSubScreen('list');
+                        setActiveNavItem('Importar NF e XML');
                       }}
                       className="w-full h-12 bg-primary hover:bg-primary-hover text-white font-bold text-xs rounded-btn flex items-center justify-center space-x-2 transition-all duration-200 hover:scale-[1.01] active:scale-95 shadow-md shadow-primary/20"
                     >
-                      <span>Cadastrar Novo Cliente</span>
-                      <Plus className="h-4 w-4" />
+                      <span>Novas Importações</span>
+                      <UploadCloud className="h-4 w-4" />
                     </button>
                   </div>
 
