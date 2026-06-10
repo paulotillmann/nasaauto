@@ -215,8 +215,8 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthSuccess }) => {
                 alt="Technocode" 
                 className="h-[120px] w-auto opacity-80 select-none pointer-events-none"
               />
-              <span className="text-[10px] text-textSecondary/40 mt-2 tracking-wider uppercase font-semibold select-none">
-                by <span className="text-white">Paulo Tillmann</span>
+              <span className="text-[10px] text-white/80 mt-2 tracking-wider uppercase font-semibold select-none">
+                by Paulo Tillmann
               </span>
             </div>
           </div>
