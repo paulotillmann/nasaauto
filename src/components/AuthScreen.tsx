@@ -209,12 +209,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthSuccess }) => {
             <p className="text-sm text-textSecondary/90 max-w-xs leading-relaxed">
               Importação simplificada de arquivos XML, controle financeiro ágil e cadastros centralizados em um só lugar.
             </p>
-            <div className="pt-4 flex items-center justify-center">
+            <div className="pt-4 flex flex-col items-center justify-center">
               <img 
                 src="/technocode-logo-white.png" 
                 alt="Technocode" 
-                className="h-[80px] w-auto opacity-80 select-none pointer-events-none"
+                className="h-[120px] w-auto opacity-80 select-none pointer-events-none"
               />
+              <span className="text-[10px] text-textSecondary/40 mt-2 tracking-wider uppercase font-semibold select-none">
+                by Paulo Tillmann
+              </span>
             </div>
           </div>
 
